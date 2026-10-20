@@ -931,7 +931,7 @@ export default function App() {
           <div className="flex items-center gap-3.5">
             <div className="w-10 h-10 rounded-xl overflow-hidden bg-[#e4e0d7] flex items-center justify-center border border-[#262522]">
               <img
-                src="https://hquhsllkrnkpuniauqmp.supabase.co/storage/v1/object/sign/Logo/Logo.png?token=eyJraWQiOiIxZGUwZTg3MS0xYzc2LTQxYzgtOWQwYy02NDM2ZmU4ZWNiZWUiLCJhbGciOiJIUzUxMiJ9.eyJ1cmwiOiJMb2dvL0xvZ28ucG5nIiwic2NvcGUiOiJkb3dubG9hZCIsImlhdCI6MTc5MjUzMzM0NCwiZXhwIjoyMTA3ODkzMzQ0fQ.t2SCoQcpd1y0IwKzn0zXnY4GJDnwr2zmLdnJVBZwQ0rsM_oOatm2yRy1Ie24osH8XO_pmlmla2OAzS-bDfjKFQ"
+                src="https://supabase.com/dashboard/project/hquhsllkrnkpuniauqmp/storage/files/buckets/Logo?preview=Logo.png"
                 alt="Biblioteca STL Logo"
                 className="w-full h-full object-cover"
                 onError={(e) => {
