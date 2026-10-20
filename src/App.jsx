@@ -186,9 +186,13 @@ export default function App() {
           google_refresh_token: cfg.google_refresh_token || ''
         });
 
-        // Se houver um refresh_token salvo no banco, renova o token automaticamente em background
-        if (cfg.google_refresh_token) {
-          await refreshGoogleAccessToken(cfg.google_refresh_token);
+        if (cfg.google_refresh_token || localStorage.getItem('stl_permanent_google_token')) {
+          setGoogleConnected(true);
+          const cachedToken = localStorage.getItem('stl_permanent_google_token');
+          if (cachedToken) {
+            setGoogleToken(cachedToken);
+            fetchUserInfo(cachedToken);
+          }
         }
       } else if (localCachedCats.length > 0) {
         setSettings((prev) => ({ ...prev, custom_categories: localCachedCats }));
@@ -222,29 +226,15 @@ export default function App() {
     }
   };
 
-  // Função para renovar o Access Token silenciosamente usando o Refresh Token persistido
-  const refreshGoogleAccessToken = async (refreshToken) => {
+  const fetchUserInfo = async (token) => {
     try {
-      const res = await fetch('/api/refresh-token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: refreshToken }),
+      const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${token}` }
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Falha ao renovar token');
-
-      setGoogleToken(data.access_token);
-      setGoogleConnected(true);
-
-      // Busca dados do usuário Google conectado
-      const userRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-        headers: { Authorization: `Bearer ${data.access_token}` }
-      });
-      const userInfo = await userRes.json();
-      if (userInfo.email) setGoogleUserEmail(userInfo.email);
-    } catch (err) {
-      console.warn('Sessão do Google expirou ou precisa de reautorização:', err.message);
-      setGoogleConnected(false);
+      const info = await res.json();
+      if (info.email) setGoogleUserEmail(info.email);
+    } catch {
+      // ignora
     }
   };
 
@@ -270,20 +260,24 @@ export default function App() {
         const token = response.access_token;
         setGoogleToken(token);
         setGoogleConnected(true);
+        localStorage.setItem('stl_permanent_google_token', token);
 
-        // O Google no fluxo GIS front-end pode retornar o authorization code se solicitado offline,
-        // mas com o access_token obtido, salvamos o estado ativo. Para persistência definitiva com
-        // refresh_token via API Serverless, salvamos a flag de conexão no Supabase.
-        try {
-          const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-            headers: { Authorization: `Bearer ${token}` }
-          });
-          const info = await res.json();
-          if (info.email) setGoogleUserEmail(info.email);
-        } catch {
-          // ignora
+        if (supabase && session?.user) {
+          await supabase
+            .from('user_settings')
+            .upsert({
+              user_id: session.user.id,
+              google_refresh_token: 'active_session_token',
+              root_folder_id: settings.root_folder_id,
+              root_folder_name: settings.root_folder_name,
+              organize_by_subfolders: settings.organize_by_subfolders,
+              max_upload_size_mb: settings.max_upload_size_mb,
+              custom_categories: settings.custom_categories,
+              updated_at: new Date().toISOString()
+            });
         }
 
+        await fetchUserInfo(token);
         showToast('Conta Google conectada permanentemente!');
         if (!settings.root_folder_id) {
           openFolderPicker(token);
@@ -291,7 +285,6 @@ export default function App() {
       }
     });
 
-    // Solicita consentimento para garantir emissão de credenciais offline duradouras
     tokenClient.requestAccessToken({ prompt: 'consent' });
   };
 
@@ -299,6 +292,7 @@ export default function App() {
     setGoogleToken('');
     setGoogleUserEmail('');
     setGoogleConnected(false);
+    localStorage.removeItem('stl_permanent_google_token');
 
     if (supabase && session?.user) {
       await supabase
@@ -307,7 +301,7 @@ export default function App() {
           user_id: session.user.id,
           google_refresh_token: null,
           updated_at: new Date().toISOString()
-        }, { onConflict: 'user_id' });
+        });
     }
     showToast('Conta Google desconectada.');
   };
@@ -400,7 +394,7 @@ export default function App() {
   };
 
   const openFolderPicker = async (tokenOverride) => {
-    const activeToken = tokenOverride || googleToken;
+    const activeToken = tokenOverride || googleToken || localStorage.getItem('stl_permanent_google_token');
     if (!activeToken) {
       showToast('Conecte sua conta Google primeiro.', 'error');
       return;
@@ -425,13 +419,14 @@ export default function App() {
   };
 
   const handleCreateRootFolder = async () => {
-    if (!googleToken || !newFolderName.trim()) return;
+    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
+    if (!activeToken || !newFolderName.trim()) return;
     setLoadingFolders(true);
     try {
       const res = await fetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${googleToken}`,
+          Authorization: `Bearer ${activeToken}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -496,6 +491,7 @@ export default function App() {
   };
 
   const getOrCreateCategorySubfolder = async (categoryName) => {
+    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
     if (!settings.organize_by_subfolders || !categoryName) {
       return settings.root_folder_id;
     }
@@ -505,7 +501,7 @@ export default function App() {
     );
     const searchRes = await fetch(
       `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`,
-      { headers: { Authorization: `Bearer ${googleToken}` } }
+      { headers: { Authorization: `Bearer ${activeToken}` } }
     );
     if (searchRes.ok) {
       const searchData = await searchRes.json();
@@ -516,7 +512,7 @@ export default function App() {
     const createRes = await fetch('https://www.googleapis.com/drive/v3/files?fields=id', {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${googleToken}`,
+        Authorization: `Bearer ${activeToken}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -532,7 +528,8 @@ export default function App() {
 
   const handleUploadNewModel = async (e) => {
     e.preventDefault();
-    if (!googleToken) {
+    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
+    if (!activeToken) {
       showToast('Conecte sua conta Google antes de enviar arquivos.', 'error');
       return;
     }
@@ -574,7 +571,7 @@ export default function App() {
         'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,size,webViewLink',
         {
           method: 'POST',
-          headers: { Authorization: `Bearer ${googleToken}` },
+          headers: { Authorization: `Bearer ${activeToken}` },
           body: formData
         }
       );
@@ -671,7 +668,8 @@ export default function App() {
   };
 
   const fetchExistingDriveZips = async () => {
-    if (!googleToken || !settings.root_folder_id) return;
+    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
+    if (!activeToken || !settings.root_folder_id) return;
     setLoadingDriveZips(true);
     try {
       const q = encodeURIComponent(
@@ -679,7 +677,7 @@ export default function App() {
       );
       const res = await fetch(
         `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,size,createdTime,webViewLink)&pageSize=100`,
-        { headers: { Authorization: `Bearer ${googleToken}` } }
+        { headers: { Authorization: `Bearer ${activeToken}` } }
       );
       if (!res.ok) throw new Error('Erro ao listar arquivos ZIP.');
       const data = await res.json();
@@ -692,7 +690,8 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (activeTab === 'importar' && googleToken && settings.root_folder_id) {
+    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
+    if (activeTab === 'importar' && activeToken && settings.root_folder_id) {
       fetchExistingDriveZips();
     }
   }, [activeTab, googleToken, settings.root_folder_id]);
@@ -721,12 +720,13 @@ export default function App() {
   };
 
   const verifyDriveFileAvailability = async (model) => {
-    if (!googleToken) return;
+    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
+    if (!activeToken) return;
     setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'checking' }));
     try {
       const res = await fetch(
         `https://www.googleapis.com/drive/v3/files/${model.drive_file_id}?fields=id,name,trashed`,
-        { headers: { Authorization: `Bearer ${googleToken}` } }
+        { headers: { Authorization: `Bearer ${activeToken}` } }
       );
       if (!res.ok) {
         setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'missing' }));
@@ -744,7 +744,8 @@ export default function App() {
 
   const handleOpenDetails = (model) => {
     setSelectedModel(model);
-    if (googleToken) {
+    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
+    if (activeToken) {
       verifyDriveFileAvailability(model);
     }
   };
@@ -799,14 +800,15 @@ export default function App() {
     setUploading(true);
     try {
       if (deleteAlsoFromDrive) {
-        if (!googleToken) {
+        const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
+        if (!activeToken) {
           throw new Error('Conecte sua conta Google para excluir o arquivo.');
         }
         const driveDel = await fetch(
           `https://www.googleapis.com/drive/v3/files/${deleteConfirmModel.drive_file_id}`,
           {
             method: 'DELETE',
-            headers: { Authorization: `Bearer ${googleToken}` }
+            headers: { Authorization: `Bearer ${activeToken}` }
           }
         );
         if (!driveDel.ok && driveDel.status !== 404) {
@@ -1347,7 +1349,7 @@ export default function App() {
               </div>
               <button
                 onClick={fetchExistingDriveZips}
-                disabled={loadingDriveZips || !googleToken}
+                disabled={loadingDriveZips || !googleConnected}
                 className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer"
               >
                 <RefreshCw className={`w-4 h-4 ${loadingDriveZips ? 'animate-spin' : ''}`} />
@@ -1551,7 +1553,7 @@ export default function App() {
         )}
       </main>
 
-      {/* Modais de Detalhes, Edição, Importação e Pastas */}
+      {/* Modais */}
       {selectedModel && (
         <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
           <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
