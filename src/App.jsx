@@ -176,7 +176,7 @@ export default function App() {
       if (cfg) {
         const dbCats = Array.isArray(cfg.custom_categories) ? cfg.custom_categories : [];
         const mergedCats = Array.from(new Set([...dbCats, ...localCachedCats]));
-        
+
         setSettings({
           root_folder_id: cfg.root_folder_id || '',
           root_folder_name: cfg.root_folder_name || '',
@@ -256,7 +256,7 @@ export default function App() {
           showToast(`Erro na autorização Google: ${response.error}`, 'error');
           return;
         }
-        
+
         const token = response.access_token;
         setGoogleToken(token);
         setGoogleConnected(true);
@@ -929,8 +929,17 @@ export default function App() {
       <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex items-center justify-center p-4">
         <div className="max-w-md w-full bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 shadow-2xl space-y-6">
           <div className="flex items-center gap-3.5">
-            <div className="p-3 rounded-xl bg-[#e4e0d7] text-[#000000] shadow-md">
-              <Box className="w-7 h-7" />
+            <div className="w-10 h-10 rounded-xl overflow-hidden bg-[#e4e0d7] flex items-center justify-center border border-[#262522]">
+              <img
+                src="https://hquhsllkrnkpuniauqmp.supabase.co/storage/v1/object/sign/Logo/Logo.png?token=eyJraWQiOiIxZGUwZTg3MS0xYzc2LTQxYzgtOWQwYy02NDM2ZmU4ZWNiZWUiLCJhbGciOiJIUzUxMiJ9.eyJ1cmwiOiJMb2dvL0xvZ28ucG5nIiwic2NvcGUiOiJkb3dubG9hZCIsImlhdCI6MTc5MjUzMzM0NCwiZXhwIjoyMTA3ODkzMzQ0fQ.t2SCoQcpd1y0IwKzn0zXnY4GJDnwr2zmLdnJVBZwQ0rsM_oOatm2yRy1Ie24osH8XO_pmlmla2OAzS-bDfjKFQ"
+                alt="Biblioteca STL Logo"
+                className="w-full h-full object-cover"
+                onError={(e) => {
+                  // Fallback caso a imagem falhe ao carregar: exibe o ícone padrão
+                  e.target.style.display = 'none';
+                  e.target.parentElement.innerHTML = '<svg class="w-5 h-5 text-[#000000]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></string>';
+                }}
+              />
             </div>
             <div>
               <h1 className="text-2xl font-bold text-[#e4e0d7] tracking-tight">Biblioteca STL</h1>
@@ -1018,9 +1027,8 @@ export default function App() {
           <nav className="flex items-center gap-1 sm:gap-2 overflow-x-auto py-1">
             <button
               onClick={() => setActiveTab('catalogo')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-                activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-              }`}
+              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+                }`}
             >
               <Box className="w-4 h-4" />
               <span>Catálogo ({models.length})</span>
@@ -1028,9 +1036,8 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('upload')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-                activeTab === 'upload' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-              }`}
+              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'upload' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+                }`}
             >
               <Upload className="w-4 h-4" />
               <span>Enviar</span>
@@ -1038,9 +1045,8 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('importar')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-                activeTab === 'importar' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-              }`}
+              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'importar' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+                }`}
             >
               <FolderDown className="w-4 h-4" />
               <span>Importar</span>
@@ -1048,9 +1054,8 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('configuracoes')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-                activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-              }`}
+              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+                }`}
             >
               <Settings className="w-4 h-4" />
               <span className="hidden lg:inline">Configurações</span>
@@ -1113,9 +1118,8 @@ export default function App() {
                   <button
                     key={cat}
                     onClick={() => setSelectedCategory(cat)}
-                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer ${
-                      selectedCategory === cat ? 'bg-[#e4e0d7] text-[#000000]' : 'bg-[#0a0a0a] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522]'
-                    }`}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer ${selectedCategory === cat ? 'bg-[#e4e0d7] text-[#000000]' : 'bg-[#0a0a0a] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522]'
+                      }`}
                   >
                     {cat}
                   </button>
