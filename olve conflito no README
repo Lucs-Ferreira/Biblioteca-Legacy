@@ -1,0 +1,26 @@
+[1mdiff --cc README.md[m
+[1mindex d937833,9734cd4..0000000[m
+[1m--- a/README.md[m
+[1m+++ b/README.md[m
+[36m@@@ -1,16 -1,1 +1,20 @@@[m
+[31m -# Biblioteca-Legacy[m
+[32m++<<<<<<< HEAD[m
+[32m +# React + Vite[m
+[32m +[m
+[32m +This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.[m
+[32m +[m
+[32m +Currently, two official plugins are available:[m
+[32m +[m
+[32m +- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)[m
+[32m +- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)[m
+[32m +[m
+[32m +## React Compiler[m
+[32m +[m
+[32m +The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).[m
+[32m +[m
+[32m +## Expanding the Oxlint configuration[m
+[32m +[m
+[32m +If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.[m
+[32m++=======[m
+[32m++# Biblioteca-Legacy[m
+[32m++>>>>>>> 930af5442643231313e42ce4fb5a716358e8e244[m
