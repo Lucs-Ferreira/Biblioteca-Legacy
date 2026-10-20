@@ -4,7 +4,7 @@ import {
   Box, Upload, FolderDown, Settings, Search, Plus, ExternalLink,
   Trash2, Edit3, Eye, CheckCircle2, AlertTriangle, Folder,
   HardDrive, ShieldCheck, RefreshCw, X, Check, FileArchive,
-  LogOut, Lock, Tag, Calendar, Info, CloudOff, FolderPlus, KeyRound
+  LogOut, FolderPlus, Tag
 } from 'lucide-react';
 
 // ============================================================================
@@ -18,13 +18,17 @@ const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null;
 
-// Escopos mínimos: drive.file (gerenciar arquivos/pastas criados pelo app) +
-// drive.metadata.readonly (listar ZIPs existentes colocados manualmente na pasta raiz)
 const GOOGLE_SCOPES = 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly email profile';
 
-const DEFAULT_CATEGORIES = [
-  'Geral', 'Miniaturas & RPG', 'Peças Mecânicas', 'Utilidades Domésticas',
-  'Cosplay & Props', 'Organizadores', 'Articulados', 'Suportes & Cases'
+const BASE_CATEGORIES = [
+  'Geral',
+  'Miniaturas & RPG',
+  'Peças Mecânicas',
+  'Utilidades Domésticas',
+  'Cosplay & Props',
+  'Organizadores',
+  'Articulados',
+  'Suportes & Cases'
 ];
 
 function formatBytes(bytes = 0) {
@@ -59,15 +63,20 @@ export default function App() {
   // Estado Google Drive OAuth
   const [googleToken, setGoogleToken] = useState(() => sessionStorage.getItem('stl_google_token') || '');
   const [googleUserEmail, setGoogleUserEmail] = useState(() => sessionStorage.getItem('stl_google_email') || '');
-  const [gisReady, setGisReady] = useState(false);
 
-  // Configurações Persistentes do Usuário
+  // Configurações Persistentes do Usuário (incluindo custom_categories permanentes)
   const [settings, setSettings] = useState({
     root_folder_id: '',
     root_folder_name: '',
     organize_by_subfolders: false,
-    max_upload_size_mb: 150
+    max_upload_size_mb: 150,
+    custom_categories: []
   });
+
+  // Estados para criação rápida de nova categoria
+  const [addingCategoryContext, setAddingCategoryContext] = useState(null); // 'upload' | 'import' | 'edit' | 'settings'
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [savingCategory, setSavingCategory] = useState(false);
 
   // Dados da Biblioteca
   const [models, setModels] = useState([]);
@@ -107,7 +116,6 @@ export default function App() {
   });
   const [uploading, setUploading] = useState(false);
   const [uploadStep, setUploadStep] = useState('');
-  // Recuperação caso o ZIP suba pro Drive mas o banco falhe
   const [pendingRecovery, setPendingRecovery] = useState(null);
 
   // Estado de Importação do Drive
@@ -128,13 +136,19 @@ export default function App() {
     setTimeout(() => setToast(null), 5000);
   };
 
+  // Lista unificada de Categorias (Base + Personalizadas salvas no banco + Existentes nos modelos)
+  const allCategories = useMemo(() => {
+    const custom = Array.isArray(settings.custom_categories) ? settings.custom_categories : [];
+    const fromModels = models.map((m) => m.category).filter(Boolean);
+    return Array.from(new Set([...BASE_CATEGORIES, ...custom, ...fromModels]));
+  }, [settings.custom_categories, models]);
+
   // Carrega script oficial do Google Identity Services (GIS)
   useEffect(() => {
     const script = document.createElement('script');
     script.src = 'https://accounts.google.com/gsi/client';
     script.async = true;
     script.defer = true;
-    script.onload = () => setGisReady(true);
     document.body.appendChild(script);
   }, []);
 
@@ -155,7 +169,6 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  // Carrega configurações e modelos ao autenticar
   useEffect(() => {
     if (session?.user) {
       loadUserData();
@@ -166,23 +179,29 @@ export default function App() {
     if (!supabase || !session?.user) return;
     setLoadingData(true);
     try {
-      // 1. Busca configurações
       const { data: cfg } = await supabase
         .from('user_settings')
         .select('*')
         .eq('user_id', session.user.id)
         .maybeSingle();
 
+      // Fallback local caso a coluna custom_categories ainda não tenha sido criada no SQL
+      const localCachedCats = JSON.parse(localStorage.getItem(`stl_cats_${session.user.id}`) || '[]');
+
       if (cfg) {
+        const dbCats = Array.isArray(cfg.custom_categories) ? cfg.custom_categories : [];
+        const mergedCats = Array.from(new Set([...dbCats, ...localCachedCats]));
         setSettings({
           root_folder_id: cfg.root_folder_id || '',
           root_folder_name: cfg.root_folder_name || '',
           organize_by_subfolders: cfg.organize_by_subfolders || false,
-          max_upload_size_mb: cfg.max_upload_size_mb || 150
+          max_upload_size_mb: cfg.max_upload_size_mb || 150,
+          custom_categories: mergedCats
         });
+      } else if (localCachedCats.length > 0) {
+        setSettings((prev) => ({ ...prev, custom_categories: localCachedCats }));
       }
 
-      // 2. Busca modelos cadastrados
       const { data: modelList, error: modelErr } = await supabase
         .from('stl_models')
         .select('*')
@@ -191,7 +210,6 @@ export default function App() {
       if (modelErr) throw modelErr;
       setModels(modelList || []);
 
-      // 3. Gera URLs assinadas do bucket privado para as imagens de referência
       const urls = {};
       for (const m of (modelList || [])) {
         if (m.image_path) {
@@ -210,6 +228,85 @@ export default function App() {
     } finally {
       setLoadingData(false);
     }
+  };
+
+  // ============================================================================
+  // ADICIONAR E REMOVER CATEGORIAS PERSONALIZADAS PERMANENTEMENTE
+  // ============================================================================
+  const handleAddPermanentCategory = async (targetContext) => {
+    const trimmed = newCategoryName.trim();
+    if (!trimmed) return;
+
+    if (allCategories.some((c) => c.toLowerCase() === trimmed.toLowerCase())) {
+      showToast('Essa categoria já existe na lista!', 'error');
+      return;
+    }
+
+    setSavingCategory(true);
+    const updatedCustom = Array.from(new Set([...(settings.custom_categories || []), trimmed]));
+
+    // Salva também em cache local como segurança extra
+    if (session?.user) {
+      localStorage.setItem(`stl_cats_${session.user.id}`, JSON.stringify(updatedCustom));
+    }
+
+    setSettings((prev) => ({ ...prev, custom_categories: updatedCustom }));
+
+    // Tenta persistir na tabela user_settings do Supabase
+    if (supabase && session?.user) {
+      const { error } = await supabase
+        .from('user_settings')
+        .upsert({
+          user_id: session.user.id,
+          root_folder_id: settings.root_folder_id,
+          root_folder_name: settings.root_folder_name,
+          organize_by_subfolders: settings.organize_by_subfolders,
+          max_upload_size_mb: settings.max_upload_size_mb,
+          custom_categories: updatedCustom,
+          updated_at: new Date().toISOString()
+        });
+
+      if (error && error.message?.includes('custom_categories')) {
+        // Caso o usuário ainda não tenha rodado o ALTER TABLE, avisa mas mantém funcionando
+        console.warn('Coluna custom_categories ausente, usando persistência híbrida.');
+      }
+    }
+
+    // Seleciona automaticamente a categoria recém-criada no formulário aberto
+    if (targetContext === 'upload') {
+      setUploadForm((prev) => ({ ...prev, category: trimmed }));
+    } else if (targetContext === 'import') {
+      setImportForm((prev) => ({ ...prev, category: trimmed }));
+    } else if (targetContext === 'edit' && editingModel) {
+      setEditingModel((prev) => ({ ...prev, category: trimmed }));
+    }
+
+    setNewCategoryName('');
+    setAddingCategoryContext(null);
+    setSavingCategory(false);
+    showToast(`Categoria "${trimmed}" adicionada permanentemente!`);
+  };
+
+  const handleRemoveCustomCategory = async (catToRemove) => {
+    const updatedCustom = (settings.custom_categories || []).filter((c) => c !== catToRemove);
+    setSettings((prev) => ({ ...prev, custom_categories: updatedCustom }));
+    if (session?.user) {
+      localStorage.setItem(`stl_cats_${session.user.id}`, JSON.stringify(updatedCustom));
+    }
+    if (supabase && session?.user) {
+      await supabase
+        .from('user_settings')
+        .upsert({
+          user_id: session.user.id,
+          root_folder_id: settings.root_folder_id,
+          root_folder_name: settings.root_folder_name,
+          organize_by_subfolders: settings.organize_by_subfolders,
+          max_upload_size_mb: settings.max_upload_size_mb,
+          custom_categories: updatedCustom,
+          updated_at: new Date().toISOString()
+        });
+    }
+    showToast(`Categoria "${catToRemove}" removida da lista personalizada.`);
   };
 
   // Login / Cadastro no Supabase
@@ -232,7 +329,7 @@ export default function App() {
     }
   };
 
-  // Conectar Conta Google via OAuth2 (Google Identity Services)
+  // Conectar Conta Google via OAuth2
   const handleConnectGoogle = () => {
     if (!GOOGLE_CLIENT_ID) {
       showToast('VITE_GOOGLE_CLIENT_ID não configurado nas variáveis da Vercel.', 'error');
@@ -255,7 +352,6 @@ export default function App() {
         setGoogleToken(token);
         sessionStorage.setItem('stl_google_token', token);
 
-        // Busca e-mail do usuário conectado
         try {
           const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
             headers: { Authorization: `Bearer ${token}` }
@@ -266,7 +362,7 @@ export default function App() {
             sessionStorage.setItem('stl_google_email', info.email);
           }
         } catch {
-          // ignora falha de userinfo
+          // ignora erro de userinfo
         }
 
         showToast('Conta Google conectada com sucesso!');
@@ -377,7 +473,10 @@ export default function App() {
       .from('user_settings')
       .upsert({
         user_id: session.user.id,
-        ...merged,
+        root_folder_id: merged.root_folder_id,
+        root_folder_name: merged.root_folder_name,
+        organize_by_subfolders: merged.organize_by_subfolders,
+        max_upload_size_mb: merged.max_upload_size_mb,
         updated_at: new Date().toISOString()
       });
     if (error) {
@@ -408,7 +507,6 @@ export default function App() {
         return searchData.files[0].id;
       }
     }
-    // Cria a subpasta da categoria dentro da pasta raiz
     const createRes = await fetch('https://www.googleapis.com/drive/v3/files?fields=id', {
       method: 'POST',
       headers: {
@@ -452,11 +550,9 @@ export default function App() {
     let uploadedDriveData = null;
 
     try {
-      // 1. Determina pasta destino (Raiz ou Subpasta por categoria)
       setUploadStep('Verificando pasta de destino no Google Drive...');
       const targetFolderId = await getOrCreateCategorySubfolder(uploadForm.category);
 
-      // 2. Envia o ZIP diretamente para o Google Drive API v3 (Multipart upload)
       setUploadStep('Enviando arquivo ZIP diretamente para o Google Drive...');
       const metadata = {
         name: uploadForm.zipFile.name,
@@ -483,7 +579,6 @@ export default function App() {
 
       uploadedDriveData = await driveRes.json();
 
-      // 3. Salva a imagem de referência no Supabase Storage (Bucket Privado) e os metadados no banco
       await completeDatabaseRegistration(uploadedDriveData, targetFolderId, uploadForm);
 
       setUploadForm({
@@ -494,7 +589,6 @@ export default function App() {
       setActiveTab('catalogo');
       loadUserData();
     } catch (err) {
-      // Se o upload para o Drive concluiu, mas o salvamento dos metadados falhou:
       if (uploadedDriveData?.id) {
         setPendingRecovery({
           driveData: uploadedDriveData,
@@ -610,7 +704,6 @@ export default function App() {
     e.preventDefault();
     if (!importingFile) return;
 
-    // Verifica duplicidade por drive_file_id
     if (models.some((m) => m.drive_file_id === importingFile.id)) {
       showToast('Este arquivo ZIP já está cadastrado na sua Biblioteca STL.', 'error');
       return;
@@ -711,7 +804,6 @@ export default function App() {
     if (!deleteConfirmModel) return;
     setUploading(true);
     try {
-      // Se o usuário marcou explicitamente para excluir também do Google Drive:
       if (deleteAlsoFromDrive) {
         if (!googleToken) {
           throw new Error('Conecte sua conta Google para poder excluir o arquivo ZIP do Drive.');
@@ -728,12 +820,10 @@ export default function App() {
         }
       }
 
-      // Remove imagem do Supabase Storage se existir
       if (deleteConfirmModel.image_path) {
         await supabase.storage.from('stl-images').remove([deleteConfirmModel.image_path]);
       }
 
-      // Remove registro do catálogo
       const { error } = await supabase
         .from('stl_models')
         .delete()
@@ -758,6 +848,59 @@ export default function App() {
   };
 
   // ============================================================================
+  // COMPONENTE REUTILIZÁVEL DE SELEÇÃO + CRIAÇÃO RÁPIDA DE CATEGORIA
+  // ============================================================================
+  const renderCategorySelector = (currentValue, onSelectChange, contextKey) => (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <label className="block text-xs font-medium text-slate-300">Categoria</label>
+        <button
+          type="button"
+          onClick={() => {
+            setAddingCategoryContext(addingCategoryContext === contextKey ? null : contextKey);
+            setNewCategoryName('');
+          }}
+          className="text-[11px] font-semibold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          <span>{addingCategoryContext === contextKey ? 'Cancelar' : 'Nova Categoria'}</span>
+        </button>
+      </div>
+
+      {addingCategoryContext === contextKey ? (
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={newCategoryName}
+            onChange={(e) => setNewCategoryName(e.target.value)}
+            placeholder="Nome da nova categoria..."
+            autoFocus
+            className="flex-1 px-3 py-2 bg-slate-950 border border-indigo-500 rounded-xl text-sm text-white focus:outline-none"
+          />
+          <button
+            type="button"
+            disabled={savingCategory}
+            onClick={() => handleAddPermanentCategory(contextKey)}
+            className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold cursor-pointer shrink-0"
+          >
+            Salvar
+          </button>
+        </div>
+      ) : (
+        <select
+          value={currentValue}
+          onChange={(e) => onSelectChange(e.target.value)}
+          className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white"
+        >
+          {allCategories.map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
+        </select>
+      )}
+    </div>
+  );
+
+  // ============================================================================
   // FILTROS DO CATÁLOGO
   // ============================================================================
   const filteredModels = useMemo(() => {
@@ -773,9 +916,6 @@ export default function App() {
     });
   }, [models, selectedCategory, searchQuery]);
 
-  // ============================================================================
-  // TELA DE DIAGNÓSTICO CASO AS VARIÁVEIS DA VERCEL NÃO ESTEJAM CONFIGURADAS
-  // ============================================================================
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6">
@@ -785,15 +925,7 @@ export default function App() {
             <h1 className="text-xl font-bold">Configuração de Variáveis Pendente</h1>
           </div>
           <p className="text-sm text-slate-300 leading-relaxed">
-            A <strong>Biblioteca STL</strong> está no ar, mas não encontrou as variáveis de ambiente do Supabase na Vercel.
-          </p>
-          <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 text-xs font-mono space-y-1 text-slate-300">
-            <div>VITE_SUPABASE_URL: {SUPABASE_URL ? '✅ Configurada' : '❌ Ausente'}</div>
-            <div>VITE_SUPABASE_ANON_KEY: {SUPABASE_ANON_KEY ? '✅ Configurada' : '❌ Ausente'}</div>
-            <div>VITE_GOOGLE_CLIENT_ID: {GOOGLE_CLIENT_ID ? '✅ Configurada' : '⚠️ Ausente'}</div>
-          </div>
-          <p className="text-xs text-slate-400">
-            Acesse o painel da Vercel em <strong>Settings &rarr; Environment Variables</strong>, adicione as chaves acima e faça um <strong>Redeploy</strong>.
+            Configure <code>VITE_SUPABASE_URL</code>, <code>VITE_SUPABASE_ANON_KEY</code> e <code>VITE_GOOGLE_CLIENT_ID</code> na Vercel.
           </p>
         </div>
       </div>
@@ -808,9 +940,6 @@ export default function App() {
     );
   }
 
-  // ============================================================================
-  // TELA DE LOGIN PESSOAL (SUPABASE AUTH + RLS)
-  // ============================================================================
   if (!session) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4">
@@ -876,12 +1005,8 @@ export default function App() {
     );
   }
 
-  // ============================================================================
-  // INTERFACE PRINCIPAL DA BIBLIOTECA STL
-  // ============================================================================
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      {/* Notificação Toast */}
       {toast && (
         <div className="fixed bottom-5 right-5 z-50 max-w-md px-4 py-3 rounded-xl shadow-2xl border flex items-center gap-3 bg-slate-900 border-slate-700 text-sm">
           {toast.type === 'error' ? (
@@ -908,7 +1033,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Navegação */}
           <nav className="flex items-center gap-1 sm:gap-2">
             <button
               onClick={() => setActiveTab('catalogo')}
@@ -1016,7 +1140,7 @@ export default function App() {
               </div>
 
               <div className="flex items-center gap-2 overflow-x-auto pb-1 md:pb-0">
-                {['Todas', ...DEFAULT_CATEGORIES].map((cat) => (
+                {['Todas', ...allCategories].map((cat) => (
                   <button
                     key={cat}
                     onClick={() => setSelectedCategory(cat)}
@@ -1134,7 +1258,7 @@ export default function App() {
             <div>
               <h2 className="text-lg font-bold text-white">Enviar Novo Modelo STL (.ZIP)</h2>
               <p className="text-xs text-slate-400 mt-1">
-                O arquivo ZIP será enviado diretamente para sua pasta raiz no Google Drive (nunca para o Supabase). A imagem de referência ficará no bucket privado do Supabase.
+                O arquivo ZIP será enviado diretamente para sua pasta raiz no Google Drive. A imagem de referência ficará no bucket privado do Supabase.
               </p>
             </div>
 
@@ -1145,7 +1269,7 @@ export default function App() {
                   <span>Upload no Drive concluído, mas o cadastro no banco falhou!</span>
                 </div>
                 <p className="text-xs text-slate-300">
-                  O arquivo <strong>{pendingRecovery.driveData.name}</strong> já está salvo no seu Google Drive (ID: <code>{pendingRecovery.driveData.id}</code>). Você pode concluir o salvamento dos metadados agora sem enviar o ZIP novamente:
+                  O arquivo <strong>{pendingRecovery.driveData.name}</strong> já está salvo no seu Google Drive (ID: <code>{pendingRecovery.driveData.id}</code>). Conclua o salvamento abaixo sem enviar o ZIP novamente:
                 </p>
                 <button
                   type="button"
@@ -1171,18 +1295,12 @@ export default function App() {
                     className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white"
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Categoria</label>
-                  <select
-                    value={uploadForm.category}
-                    onChange={(e) => setUploadForm({ ...uploadForm, category: e.target.value })}
-                    className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white"
-                  >
-                    {DEFAULT_CATEGORIES.map((c) => (
-                      <option key={c} value={c}>{c}</option>
-                    ))}
-                  </select>
-                </div>
+
+                {renderCategorySelector(
+                  uploadForm.category,
+                  (val) => setUploadForm({ ...uploadForm, category: val }),
+                  'upload'
+                )}
               </div>
 
               <div>
@@ -1449,7 +1567,81 @@ export default function App() {
               </div>
             </div>
 
-            {/* Bloco 2: Regras de Organização e Limites */}
+            {/* Bloco 2: Gerenciador de Categorias (Base + Personalizadas Permanentes) */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+              <div className="flex items-center gap-2.5">
+                <Tag className="w-5 h-5 text-indigo-400" />
+                <div>
+                  <h3 className="font-bold text-white text-base">Categorias da Biblioteca</h3>
+                  <p className="text-xs text-slate-400">
+                    Categorias base fixas + categorias personalizadas que ficam salvas permanentemente na sua conta.
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <span className="text-xs font-semibold text-slate-400">Categorias Base:</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {BASE_CATEGORIES.map((cat) => (
+                    <span
+                      key={cat}
+                      className="px-2.5 py-1 rounded-lg text-xs bg-slate-950 text-slate-300 border border-slate-800"
+                    >
+                      {cat}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-2 pt-2">
+                <span className="text-xs font-semibold text-indigo-300">Suas Categorias Personalizadas (Permanentes):</span>
+                <div className="flex flex-wrap gap-2">
+                  {(settings.custom_categories || []).length === 0 ? (
+                    <span className="text-xs text-slate-500">Nenhuma categoria personalizada criada ainda.</span>
+                  ) : (
+                    (settings.custom_categories || []).map((cat) => (
+                      <span
+                        key={cat}
+                        className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs bg-indigo-600/20 text-indigo-200 border border-indigo-500/30"
+                      >
+                        <span>{cat}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveCustomCategory(cat)}
+                          className="text-indigo-300 hover:text-rose-400 cursor-pointer"
+                          title="Remover da lista"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </span>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <input
+                  type="text"
+                  value={addingCategoryContext === 'settings' ? newCategoryName : ''}
+                  onFocus={() => setAddingCategoryContext('settings')}
+                  onChange={(e) => {
+                    setAddingCategoryContext('settings');
+                    setNewCategoryName(e.target.value);
+                  }}
+                  placeholder="Digite o nome de uma nova categoria permanente..."
+                  className="flex-1 px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleAddPermanentCategory('settings')}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" /> Adicionar Categoria
+                </button>
+              </div>
+            </div>
+
+            {/* Bloco 3: Regras de Organização e Limites */}
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-5">
               <h3 className="font-bold text-white text-base">Preferências de Organização e Upload</h3>
 
@@ -1484,7 +1676,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Bloco 3: Status do Supabase */}
+            {/* Bloco 4: Status do Supabase */}
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 flex items-center justify-between">
               <div className="space-y-1">
                 <div className="flex items-center gap-2 text-emerald-400 text-sm font-semibold">
@@ -1652,18 +1844,11 @@ export default function App() {
               />
             </div>
 
-            <div>
-              <label className="block text-xs text-slate-300 mb-1">Categoria</label>
-              <select
-                value={editingModel.category}
-                onChange={(e) => setEditingModel({ ...editingModel, category: e.target.value })}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white"
-              >
-                {DEFAULT_CATEGORIES.map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
-              </select>
-            </div>
+            {renderCategorySelector(
+              editingModel.category,
+              (val) => setEditingModel({ ...editingModel, category: val }),
+              'edit'
+            )}
 
             <div>
               <label className="block text-xs text-slate-300 mb-1">Descrição</label>
@@ -1794,18 +1979,11 @@ export default function App() {
               />
             </div>
 
-            <div>
-              <label className="block text-xs text-slate-300 mb-1">Categoria</label>
-              <select
-                value={importForm.category}
-                onChange={(e) => setImportForm({ ...importForm, category: e.target.value })}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white"
-              >
-                {DEFAULT_CATEGORIES.map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
-              </select>
-            </div>
+            {renderCategorySelector(
+              importForm.category,
+              (val) => setImportForm({ ...importForm, category: val }),
+              'import'
+            )}
 
             <div>
               <label className="block text-xs text-slate-300 mb-1">Descrição</label>
@@ -1874,7 +2052,6 @@ export default function App() {
               </div>
             )}
 
-            {/* Criar nova pasta */}
             <div className="space-y-2">
               <label className="block text-xs font-semibold text-slate-300">
                 Criar nova pasta raiz no seu Google Drive:
@@ -1897,7 +2074,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Selecionar pasta existente pelo ID único */}
             <div className="space-y-2">
               <label className="block text-xs font-semibold text-slate-300">
                 Ou selecione uma pasta existente (identificada pelo ID único do Drive):
