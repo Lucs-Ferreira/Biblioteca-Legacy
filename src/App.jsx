@@ -934,11 +934,6 @@ export default function App() {
                 src="/logo.png"
                 alt="Biblioteca STL Logo"
                 className="w-full h-full object-cover"
-                onError={(e) => {
-                  // Fallback caso a imagem falhe ao carregar: exibe o ícone padrão
-                  e.target.style.display = 'none';
-                  e.target.parentElement.innerHTML = '<svg class="w-5 h-5 text-[#000000]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></string>';
-                }}
               />
             </div>
             <div>
