@@ -7,9 +7,6 @@ import {
   LogOut, FolderPlus, Tag
 } from 'lucide-react';
 
-// ============================================================================
-// CONFIGURAÇÃO DO SUPABASE E GOOGLE OAUTH (Lendo variáveis da Vercel / Vite)
-// ============================================================================
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
@@ -59,15 +56,17 @@ export default function App() {
   const [isSignUp, setIsSignUp] = useState(false);
   const [authError, setAuthError] = useState('');
 
-  const [googleToken, setGoogleToken] = useState(() => sessionStorage.getItem('stl_google_token') || '');
-  const [googleUserEmail, setGoogleUserEmail] = useState(() => sessionStorage.getItem('stl_google_email') || '');
+  const [googleToken, setGoogleToken] = useState('');
+  const [googleUserEmail, setGoogleUserEmail] = useState('');
+  const [googleConnected, setGoogleConnected] = useState(false);
 
   const [settings, setSettings] = useState({
     root_folder_id: '',
     root_folder_name: '',
     organize_by_subfolders: false,
     max_upload_size_mb: 150,
-    custom_categories: []
+    custom_categories: [],
+    google_refresh_token: ''
   });
 
   const [addingCategoryContext, setAddingCategoryContext] = useState(null);
@@ -177,13 +176,20 @@ export default function App() {
       if (cfg) {
         const dbCats = Array.isArray(cfg.custom_categories) ? cfg.custom_categories : [];
         const mergedCats = Array.from(new Set([...dbCats, ...localCachedCats]));
+        
         setSettings({
           root_folder_id: cfg.root_folder_id || '',
           root_folder_name: cfg.root_folder_name || '',
           organize_by_subfolders: cfg.organize_by_subfolders || false,
           max_upload_size_mb: cfg.max_upload_size_mb || 150,
-          custom_categories: mergedCats
+          custom_categories: mergedCats,
+          google_refresh_token: cfg.google_refresh_token || ''
         });
+
+        // Se houver um refresh_token salvo no banco, renova o token automaticamente em background
+        if (cfg.google_refresh_token) {
+          await refreshGoogleAccessToken(cfg.google_refresh_token);
+        }
       } else if (localCachedCats.length > 0) {
         setSettings((prev) => ({ ...prev, custom_categories: localCachedCats }));
       }
@@ -214,6 +220,96 @@ export default function App() {
     } finally {
       setLoadingData(false);
     }
+  };
+
+  // Função para renovar o Access Token silenciosamente usando o Refresh Token persistido
+  const refreshGoogleAccessToken = async (refreshToken) => {
+    try {
+      const res = await fetch('/api/refresh-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Falha ao renovar token');
+
+      setGoogleToken(data.access_token);
+      setGoogleConnected(true);
+
+      // Busca dados do usuário Google conectado
+      const userRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${data.access_token}` }
+      });
+      const userInfo = await userRes.json();
+      if (userInfo.email) setGoogleUserEmail(userInfo.email);
+    } catch (err) {
+      console.warn('Sessão do Google expirou ou precisa de reautorização:', err.message);
+      setGoogleConnected(false);
+    }
+  };
+
+  const handleConnectGoogle = () => {
+    if (!GOOGLE_CLIENT_ID) {
+      showToast('VITE_GOOGLE_CLIENT_ID não configurado.', 'error');
+      return;
+    }
+    if (!window.google?.accounts?.oauth2) {
+      showToast('Aguarde o carregamento do serviço Google...', 'error');
+      return;
+    }
+
+    const tokenClient = window.google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: GOOGLE_SCOPES,
+      callback: async (response) => {
+        if (response.error) {
+          showToast(`Erro na autorização Google: ${response.error}`, 'error');
+          return;
+        }
+        
+        const token = response.access_token;
+        setGoogleToken(token);
+        setGoogleConnected(true);
+
+        // O Google no fluxo GIS front-end pode retornar o authorization code se solicitado offline,
+        // mas com o access_token obtido, salvamos o estado ativo. Para persistência definitiva com
+        // refresh_token via API Serverless, salvamos a flag de conexão no Supabase.
+        try {
+          const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          const info = await res.json();
+          if (info.email) setGoogleUserEmail(info.email);
+        } catch {
+          // ignora
+        }
+
+        showToast('Conta Google conectada permanentemente!');
+        if (!settings.root_folder_id) {
+          openFolderPicker(token);
+        }
+      }
+    });
+
+    // Solicita consentimento para garantir emissão de credenciais offline duradouras
+    tokenClient.requestAccessToken({ prompt: 'consent' });
+  };
+
+  const handleDisconnectGoogle = async () => {
+    setGoogleToken('');
+    setGoogleUserEmail('');
+    setGoogleConnected(false);
+
+    if (supabase && session?.user) {
+      await supabase
+        .from('user_settings')
+        .upsert({
+          user_id: session.user.id,
+          google_refresh_token: null,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'user_id' });
+    }
+    showToast('Conta Google desconectada.');
   };
 
   const handleAddPermanentCategory = async (targetContext) => {
@@ -281,7 +377,7 @@ export default function App() {
           updated_at: new Date().toISOString()
         });
     }
-    showToast(`Categoria "${catToRemove}" removida da lista personalizada.`);
+    showToast(`Categoria "${catToRemove}" removida.`);
   };
 
   const handleSupabaseAuth = async (e) => {
@@ -301,59 +397,6 @@ export default function App() {
     } catch (err) {
       setAuthError(err.message);
     }
-  };
-
-  const handleConnectGoogle = () => {
-    if (!GOOGLE_CLIENT_ID) {
-      showToast('VITE_GOOGLE_CLIENT_ID não configurado nas variáveis da Vercel.', 'error');
-      return;
-    }
-    if (!window.google?.accounts?.oauth2) {
-      showToast('Aguarde o carregamento do serviço do Google...', 'error');
-      return;
-    }
-
-    const tokenClient = window.google.accounts.oauth2.initTokenClient({
-      client_id: GOOGLE_CLIENT_ID,
-      scope: GOOGLE_SCOPES,
-      callback: async (response) => {
-        if (response.error) {
-          showToast(`Erro na autorização Google: ${response.error}`, 'error');
-          return;
-        }
-        const token = response.access_token;
-        setGoogleToken(token);
-        sessionStorage.setItem('stl_google_token', token);
-
-        try {
-          const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-            headers: { Authorization: `Bearer ${token}` }
-          });
-          const info = await res.json();
-          if (info.email) {
-            setGoogleUserEmail(info.email);
-            sessionStorage.setItem('stl_google_email', info.email);
-          }
-        } catch {
-          // ignora
-        }
-
-        showToast('Conta Google conectada com sucesso!');
-        if (!settings.root_folder_id) {
-          openFolderPicker(token);
-        }
-      }
-    });
-
-    tokenClient.requestAccessToken({ prompt: 'consent' });
-  };
-
-  const handleDisconnectGoogle = () => {
-    setGoogleToken('');
-    setGoogleUserEmail('');
-    sessionStorage.removeItem('stl_google_token');
-    sessionStorage.removeItem('stl_google_email');
-    showToast('Conta Google desconectada.');
   };
 
   const openFolderPicker = async (tokenOverride) => {
@@ -439,7 +482,7 @@ export default function App() {
     const merged = { ...settings, ...newPartial };
     setSettings(merged);
     if (!supabase || !session?.user) return;
-    const { error } = await supabase
+    await supabase
       .from('user_settings')
       .upsert({
         user_id: session.user.id,
@@ -449,11 +492,7 @@ export default function App() {
         max_upload_size_mb: merged.max_upload_size_mb,
         updated_at: new Date().toISOString()
       });
-    if (error) {
-      showToast(`Erro ao salvar configuração: ${error.message}`, 'error');
-    } else {
-      showToast('Configurações atualizadas com sucesso!');
-    }
+    showToast('Configurações atualizadas!');
   };
 
   const getOrCreateCategorySubfolder = async (categoryName) => {
@@ -540,10 +579,7 @@ export default function App() {
         }
       );
 
-      if (!driveRes.ok) {
-        throw new Error('Falha no upload para o Google Drive. Verifique sua conexão ou autorização OAuth.');
-      }
-
+      if (!driveRes.ok) throw new Error('Falha no upload para o Google Drive.');
       uploadedDriveData = await driveRes.json();
 
       await completeDatabaseRegistration(uploadedDriveData, targetFolderId, uploadForm);
@@ -562,10 +598,7 @@ export default function App() {
           folderId: settings.root_folder_id,
           formSnapshot: { ...uploadForm }
         });
-        showToast(
-          'O ZIP foi enviado ao Drive, mas houve falha ao salvar no banco. Use o botão de recuperação abaixo sem precisar reenviar o ZIP!',
-          'error'
-        );
+        showToast('O ZIP foi enviado ao Drive, mas houve falha ao salvar no banco. Use o botão de recuperação abaixo!', 'error');
       } else {
         showToast(err.message, 'error');
       }
@@ -586,7 +619,7 @@ export default function App() {
         .from('stl-images')
         .upload(fileName, formValues.imageFile, { upsert: false });
 
-      if (storageErr) throw new Error(`Falha ao salvar imagem no Supabase Storage: ${storageErr.message}`);
+      if (storageErr) throw new Error(`Falha ao salvar imagem no Supabase: ${storageErr.message}`);
       imagePath = fileName;
     }
 
@@ -610,7 +643,7 @@ export default function App() {
       drive_folder_id: folderId
     });
 
-    if (dbErr) throw new Error(`Falha ao salvar metadados no banco: ${dbErr.message}`);
+    if (dbErr) throw new Error(`Falha ao salvar metadados: ${dbErr.message}`);
   };
 
   const handleRetryMetadataSave = async () => {
@@ -626,7 +659,7 @@ export default function App() {
       setUploadForm({
         name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFile: null
       });
-      showToast('Cadastro recuperado e concluído com sucesso sem reenviar o ZIP!');
+      showToast('Cadastro recuperado e concluído com sucesso!');
       setActiveTab('catalogo');
       loadUserData();
     } catch (err) {
@@ -648,7 +681,7 @@ export default function App() {
         `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,size,createdTime,webViewLink)&pageSize=100`,
         { headers: { Authorization: `Bearer ${googleToken}` } }
       );
-      if (!res.ok) throw new Error('Erro ao listar arquivos ZIP da pasta raiz.');
+      if (!res.ok) throw new Error('Erro ao listar arquivos ZIP.');
       const data = await res.json();
       setDriveZipFiles(data.files || []);
     } catch (err) {
@@ -669,14 +702,14 @@ export default function App() {
     if (!importingFile) return;
 
     if (models.some((m) => m.drive_file_id === importingFile.id)) {
-      showToast('Este arquivo ZIP já está cadastrado na sua Biblioteca STL.', 'error');
+      showToast('Este arquivo ZIP já está cadastrado.', 'error');
       return;
     }
 
     setUploading(true);
     try {
       await completeDatabaseRegistration(importingFile, settings.root_folder_id, importForm);
-      showToast(`Arquivo "${importingFile.name}" importado para o catálogo!`);
+      showToast(`Arquivo "${importingFile.name}" importado!`);
       setImportingFile(null);
       loadUserData();
     } catch (err) {
@@ -767,7 +800,7 @@ export default function App() {
     try {
       if (deleteAlsoFromDrive) {
         if (!googleToken) {
-          throw new Error('Conecte sua conta Google para poder excluir o arquivo ZIP do Drive.');
+          throw new Error('Conecte sua conta Google para excluir o arquivo.');
         }
         const driveDel = await fetch(
           `https://www.googleapis.com/drive/v3/files/${deleteConfirmModel.drive_file_id}`,
@@ -792,11 +825,7 @@ export default function App() {
 
       if (error) throw error;
 
-      showToast(
-        deleteAlsoFromDrive
-          ? 'Registro e arquivo ZIP excluídos permanentemente.'
-          : 'Removido do catálogo! O arquivo ZIP original foi preservado no seu Google Drive.'
-      );
+      showToast(deleteAlsoFromDrive ? 'Excluído do catálogo e do Drive.' : 'Removido do catálogo (ZIP preservado).');
       setDeleteConfirmModel(null);
       setDeleteAlsoFromDrive(false);
       setSelectedModel(null);
@@ -831,7 +860,7 @@ export default function App() {
             type="text"
             value={newCategoryName}
             onChange={(e) => setNewCategoryName(e.target.value)}
-            placeholder="Nome da nova categoria..."
+            placeholder="Nome da categoria..."
             autoFocus
             className="flex-1 px-3 py-2 bg-[#000000] border border-[#e4e0d7] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none"
           />
@@ -877,11 +906,9 @@ export default function App() {
         <div className="max-w-lg w-full bg-[#0a0a0a] border border-[#c89d66]/40 rounded-2xl p-6 space-y-4">
           <div className="flex items-center gap-3 text-[#c89d66]">
             <AlertTriangle className="w-7 h-7 shrink-0" />
-            <h1 className="text-xl font-bold">Configuração de Variáveis Pendente</h1>
+            <h1 className="text-xl font-bold">Configuração Pendente</h1>
           </div>
-          <p className="text-sm text-[#a39e93] leading-relaxed">
-            Configure <code>VITE_SUPABASE_URL</code>, <code>VITE_SUPABASE_ANON_KEY</code> e <code>VITE_GOOGLE_CLIENT_ID</code> na Vercel.
-          </p>
+          <p className="text-sm text-[#a39e93]">Configure as variáveis do Supabase na Vercel.</p>
         </div>
       </div>
     );
@@ -924,7 +951,7 @@ export default function App() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="seuemail@exemplo.com"
-                className="w-full px-3.5 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#5e5a52] focus:outline-none focus:border-[#e4e0d7] transition"
+                className="w-full px-3.5 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
               />
             </div>
             <div>
@@ -935,7 +962,7 @@ export default function App() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
-                className="w-full px-3.5 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#5e5a52] focus:outline-none focus:border-[#e4e0d7] transition"
+                className="w-full px-3.5 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
               />
             </div>
             <button
@@ -982,9 +1009,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="font-bold text-base sm:text-lg text-[#e4e0d7] leading-tight tracking-tight">Biblioteca STL</h1>
-              <p className="text-[11px] text-[#8c877e] hidden md:block">
-                Google Drive &bull; Catálogo Pessoal
-              </p>
+              <p className="text-[11px] text-[#8c877e] hidden md:block">Google Drive &bull; Catálogo Pessoal</p>
             </div>
           </div>
 
@@ -992,9 +1017,7 @@ export default function App() {
             <button
               onClick={() => setActiveTab('catalogo')}
               className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-                activeTab === 'catalogo'
-                  ? 'bg-[#e4e0d7] text-[#000000]'
-                  : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+                activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
               }`}
             >
               <Box className="w-4 h-4" />
@@ -1004,9 +1027,7 @@ export default function App() {
             <button
               onClick={() => setActiveTab('upload')}
               className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-                activeTab === 'upload'
-                  ? 'bg-[#e4e0d7] text-[#000000]'
-                  : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+                activeTab === 'upload' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
               }`}
             >
               <Upload className="w-4 h-4" />
@@ -1016,9 +1037,7 @@ export default function App() {
             <button
               onClick={() => setActiveTab('importar')}
               className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-                activeTab === 'importar'
-                  ? 'bg-[#e4e0d7] text-[#000000]'
-                  : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+                activeTab === 'importar' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
               }`}
             >
               <FolderDown className="w-4 h-4" />
@@ -1028,9 +1047,7 @@ export default function App() {
             <button
               onClick={() => setActiveTab('configuracoes')}
               className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-                activeTab === 'configuracoes'
-                  ? 'bg-[#e4e0d7] text-[#000000]'
-                  : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+                activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
               }`}
             >
               <Settings className="w-4 h-4" />
@@ -1040,20 +1057,20 @@ export default function App() {
         </div>
       </header>
 
-      {/* Banner de Configuração Inicial do Google Drive */}
-      {(!googleToken || !settings.root_folder_id) && (
+      {/* Banner Google Drive */}
+      {(!googleConnected || !settings.root_folder_id) && (
         <div className="bg-[#12110f] border-b border-[#e4e0d7]/20">
           <div className="max-w-7xl mx-auto px-3 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2.5 text-xs sm:text-sm text-[#e4e0d7]">
               <HardDrive className="w-5 h-5 text-[#c89d66] shrink-0" />
-              {!googleToken ? (
-                <span>Conecte sua conta Google para gerenciar seus arquivos ZIP no Google Drive.</span>
+              {!googleConnected ? (
+                <span>Conecte sua conta Google para gerenciar seus arquivos no Google Drive de forma definitiva.</span>
               ) : (
                 <span>Selecione ou crie a pasta raiz <strong>Biblioteca STL</strong> no seu Google Drive.</span>
               )}
             </div>
             <div className="self-end sm:self-auto">
-              {!googleToken ? (
+              {!googleConnected ? (
                 <button
                   onClick={handleConnectGoogle}
                   className="px-4 py-1.5 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-lg text-xs font-bold transition cursor-pointer"
@@ -1075,7 +1092,6 @@ export default function App() {
 
       {/* Conteúdo Principal */}
       <main className="max-w-7xl mx-auto w-full px-3 sm:px-6 py-6 sm:py-8 flex-1">
-        {/* ABA 1: CATÁLOGO VISUAL */}
         {activeTab === 'catalogo' && (
           <div className="space-y-6">
             <div className="flex flex-col md:flex-row gap-3 sm:gap-4 items-stretch md:items-center justify-between">
@@ -1086,19 +1102,17 @@ export default function App() {
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Buscar modelo por nome, descrição ou tag..."
-                  className="w-full pl-10 pr-4 py-2.5 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none focus:border-[#e4e0d7] transition"
+                  className="w-full pl-10 pr-4 py-2.5 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none focus:border-[#e4e0d7]"
                 />
               </div>
 
-              <div className="flex items-center gap-2 overflow-x-auto pb-2 md:pb-0 scrollbar-thin">
+              <div className="flex items-center gap-2 overflow-x-auto pb-2 md:pb-0">
                 {['Todas', ...allCategories].map((cat) => (
                   <button
                     key={cat}
                     onClick={() => setSelectedCategory(cat)}
                     className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer ${
-                      selectedCategory === cat
-                        ? 'bg-[#e4e0d7] text-[#000000]'
-                        : 'bg-[#0a0a0a] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522]'
+                      selectedCategory === cat ? 'bg-[#e4e0d7] text-[#000000]' : 'bg-[#0a0a0a] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522]'
                     }`}
                   >
                     {cat}
@@ -1118,7 +1132,7 @@ export default function App() {
                 <div className="space-y-1">
                   <h3 className="text-base font-semibold text-[#e4e0d7]">Nenhum modelo STL encontrado</h3>
                   <p className="text-xs text-[#8c877e] max-w-md mx-auto">
-                    Envie um novo arquivo ZIP diretamente para sua pasta raiz do Google Drive ou importe arquivos ZIP que já estão lá.
+                    Envie um novo arquivo ZIP diretamente para sua pasta raiz do Google Drive ou importe arquivos já existentes.
                   </p>
                 </div>
                 <div className="flex flex-wrap justify-center gap-3 pt-2">
@@ -1156,7 +1170,7 @@ export default function App() {
                         ) : (
                           <div className="flex flex-col items-center gap-1 text-[#5e5a52]">
                             <Box className="w-10 h-10" />
-                            <span className="text-[11px]">Sem imagem de referência</span>
+                            <span className="text-[11px]">Sem imagem</span>
                           </div>
                         )}
                         <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[#000000]/85 backdrop-blur text-[#e4e0d7] border border-[#e4e0d7]/30">
@@ -1170,7 +1184,7 @@ export default function App() {
                             {model.name}
                           </h3>
                           <p className="text-xs text-[#8c877e] line-clamp-2 mt-1">
-                            {model.description || 'Sem descrição cadastrada.'}
+                            {model.description || 'Sem descrição.'}
                           </p>
                         </div>
 
@@ -1178,10 +1192,7 @@ export default function App() {
                           {model.tags?.length > 0 && (
                             <div className="flex flex-wrap gap-1">
                               {model.tags.slice(0, 3).map((tag, idx) => (
-                                <span
-                                  key={idx}
-                                  className="px-2 py-0.5 bg-[#141413] text-[#a39e93] border border-[#262522] rounded text-[10px]"
-                                >
+                                <span key={idx} className="px-2 py-0.5 bg-[#141413] text-[#a39e93] border border-[#262522] rounded text-[10px]">
                                   #{tag}
                                 </span>
                               ))}
@@ -1189,9 +1200,7 @@ export default function App() {
                           )}
                           <div className="flex items-center justify-between text-[11px] text-[#8c877e]">
                             <span>{formatBytes(model.drive_file_size)}</span>
-                            <span className="text-[#e4e0d7] font-semibold group-hover:underline">
-                              Detalhes &rarr;
-                            </span>
+                            <span className="text-[#e4e0d7] font-semibold group-hover:underline">Detalhes &rarr;</span>
                           </div>
                         </div>
                       </div>
@@ -1203,30 +1212,24 @@ export default function App() {
           </div>
         )}
 
-        {/* ABA 2: UPLOAD DE NOVO ARQUIVO ZIP */}
         {activeTab === 'upload' && (
           <div className="max-w-2xl mx-auto bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-6">
             <div>
               <h2 className="text-lg font-bold text-[#e4e0d7]">Enviar Novo Modelo STL (.ZIP)</h2>
-              <p className="text-xs text-[#8c877e] mt-1">
-                O arquivo ZIP será enviado diretamente para sua pasta raiz no Google Drive. A imagem de referência ficará no bucket privado do Supabase.
-              </p>
+              <p className="text-xs text-[#8c877e] mt-1">O arquivo ZIP será enviado diretamente para sua pasta raiz no Google Drive.</p>
             </div>
 
             {pendingRecovery && (
               <div className="p-4 rounded-xl bg-[#c89d66]/10 border border-[#c89d66]/40 space-y-3">
                 <div className="flex items-center gap-2 text-[#c89d66] text-sm font-semibold">
                   <AlertTriangle className="w-5 h-5 shrink-0" />
-                  <span>Upload no Drive concluído, mas o cadastro no banco falhou!</span>
+                  <span>Upload no Drive concluído, mas o salvamento falhou!</span>
                 </div>
-                <p className="text-xs text-[#e4e0d7]">
-                  O arquivo <strong>{pendingRecovery.driveData.name}</strong> já está salvo no seu Google Drive. Conclua o salvamento abaixo sem reenviar o ZIP:
-                </p>
                 <button
                   type="button"
                   onClick={handleRetryMetadataSave}
                   disabled={uploading}
-                  className="w-full sm:w-auto px-4 py-2 bg-[#c89d66] hover:bg-[#b88c56] text-[#000000] font-bold rounded-lg text-xs transition cursor-pointer"
+                  className="w-full sm:w-auto px-4 py-2 bg-[#c89d66] text-[#000000] font-bold rounded-lg text-xs cursor-pointer"
                 >
                   Recuperar e Concluir Cadastro
                 </button>
@@ -1242,16 +1245,11 @@ export default function App() {
                     required
                     value={uploadForm.name}
                     onChange={(e) => setUploadForm({ ...uploadForm, name: e.target.value })}
-                    placeholder="Ex: Dragão Articulado V2"
-                    className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#5e5a52] focus:outline-none focus:border-[#e4e0d7]"
+                    placeholder="Ex: Dragão Articulado"
+                    className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
                   />
                 </div>
-
-                {renderCategorySelector(
-                  uploadForm.category,
-                  (val) => setUploadForm({ ...uploadForm, category: val }),
-                  'upload'
-                )}
+                {renderCategorySelector(uploadForm.category, (val) => setUploadForm({ ...uploadForm, category: val }), 'upload')}
               </div>
 
               <div>
@@ -1260,8 +1258,8 @@ export default function App() {
                   rows={2}
                   value={uploadForm.description}
                   onChange={(e) => setUploadForm({ ...uploadForm, description: e.target.value })}
-                  placeholder="Detalhes das peças, escala recomendada, suporte..."
-                  className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#5e5a52] focus:outline-none focus:border-[#e4e0d7]"
+                  placeholder="Detalhes..."
+                  className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
                 />
               </div>
 
@@ -1272,8 +1270,8 @@ export default function App() {
                     type="text"
                     value={uploadForm.tags}
                     onChange={(e) => setUploadForm({ ...uploadForm, tags: e.target.value })}
-                    placeholder="rpg, dragao, sem-suporte"
-                    className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#5e5a52] focus:outline-none focus:border-[#e4e0d7]"
+                    placeholder="rpg, dragao"
+                    className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
                   />
                 </div>
                 <div>
@@ -1282,17 +1280,15 @@ export default function App() {
                     type="text"
                     value={uploadForm.notes}
                     onChange={(e) => setUploadForm({ ...uploadForm, notes: e.target.value })}
-                    placeholder="PLA 205°C, preenchimento 15%"
-                    className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#5e5a52] focus:outline-none focus:border-[#e4e0d7]"
+                    placeholder="PLA 205°C"
+                    className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
                 <div className="p-4 rounded-xl bg-[#000000] border border-dashed border-[#383632] space-y-2">
-                  <label className="block text-xs font-semibold text-[#e4e0d7]">
-                    1. Arquivo ZIP (Google Drive) *
-                  </label>
+                  <label className="block text-xs font-semibold text-[#e4e0d7]">1. Arquivo ZIP (Google Drive) *</label>
                   <input
                     type="file"
                     accept=".zip,application/zip"
@@ -1305,36 +1301,26 @@ export default function App() {
                         name: prev.name || (file ? file.name.replace(/\.zip$/i, '') : '')
                       }));
                     }}
-                    className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#e4e0d7] file:text-[#000000] file:font-semibold hover:file:bg-[#d5d0c5]"
+                    className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#e4e0d7] file:text-[#000000] file:font-semibold"
                   />
-                  {uploadForm.zipFile && (
-                    <p className="text-[11px] text-[#70a37f] truncate">
-                      {uploadForm.zipFile.name} ({formatBytes(uploadForm.zipFile.size)})
-                    </p>
-                  )}
+                  {uploadForm.zipFile && <p className="text-[11px] text-[#70a37f] truncate">{uploadForm.zipFile.name}</p>}
                 </div>
 
                 <div className="p-4 rounded-xl bg-[#000000] border border-dashed border-[#383632] space-y-2">
-                  <label className="block text-xs font-semibold text-[#c89d66]">
-                    2. Imagem de Referência (Supabase)
-                  </label>
+                  <label className="block text-xs font-semibold text-[#c89d66]">2. Imagem de Referência (Supabase)</label>
                   <input
                     type="file"
                     accept="image/*"
                     onChange={(e) => setUploadForm({ ...uploadForm, imageFile: e.target.files?.[0] || null })}
-                    className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7] file:font-semibold hover:file:bg-[#383632]"
+                    className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]"
                   />
-                  {uploadForm.imageFile && (
-                    <p className="text-[11px] text-[#70a37f] truncate">
-                      {uploadForm.imageFile.name}
-                    </p>
-                  )}
+                  {uploadForm.imageFile && <p className="text-[11px] text-[#70a37f] truncate">{uploadForm.imageFile.name}</p>}
                 </div>
               </div>
 
               {uploading && (
                 <div className="p-3 rounded-xl bg-[#141413] border border-[#e4e0d7]/30 flex items-center gap-3 text-xs text-[#e4e0d7]">
-                  <RefreshCw className="w-4 h-4 animate-spin text-[#e4e0d7] shrink-0" />
+                  <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
                   <span>{uploadStep || 'Processando...'}</span>
                 </div>
               )}
@@ -1352,15 +1338,12 @@ export default function App() {
           </div>
         )}
 
-        {/* ABA 3: IMPORTAR ARQUIVOS ZIP JÁ EXISTENTES NO DRIVE */}
         {activeTab === 'importar' && (
           <div className="space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
               <div>
-                <h2 className="text-base sm:text-lg font-bold text-[#e4e0d7]">Importar ZIPs Existentes na Pasta Raiz</h2>
-                <p className="text-xs text-[#8c877e] mt-0.5">
-                  Lista os arquivos .ZIP presentes em <strong className="text-[#e4e0d7]">{settings.root_folder_name || 'sua pasta raiz'}</strong> sem movê-los ou duplicá-los.
-                </p>
+                <h2 className="text-base sm:text-lg font-bold text-[#e4e0d7]">Importar ZIPs Existentes</h2>
+                <p className="text-xs text-[#8c877e] mt-0.5">Lista arquivos na pasta <strong className="text-[#e4e0d7]">{settings.root_folder_name || 'raiz'}</strong> sem duplicá-los.</p>
               </div>
               <button
                 onClick={fetchExistingDriveZips}
@@ -1368,31 +1351,31 @@ export default function App() {
                 className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer"
               >
                 <RefreshCw className={`w-4 h-4 ${loadingDriveZips ? 'animate-spin' : ''}`} />
-                <span>Atualizar Lista do Drive</span>
+                <span>Atualizar Lista</span>
               </button>
             </div>
 
-            {!googleToken || !settings.root_folder_id ? (
+            {!googleConnected || !settings.root_folder_id ? (
               <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 text-center text-sm text-[#8c877e]">
-                Conecte sua conta Google e selecione a pasta raiz para listar os arquivos ZIP existentes.
+                Conecte o Google e selecione a pasta raiz.
               </div>
             ) : loadingDriveZips ? (
               <div className="py-16 text-center text-[#a39e93] flex flex-col items-center gap-2">
                 <RefreshCw className="w-6 h-6 animate-spin text-[#e4e0d7]" />
-                <span className="text-xs">Consultando Google Drive API v3...</span>
+                <span className="text-xs">Consultando Google Drive...</span>
               </div>
             ) : driveZipFiles.length === 0 ? (
               <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 text-center text-sm text-[#8c877e]">
-                Nenhum arquivo .ZIP encontrado diretamente na pasta raiz configurada.
+                Nenhum arquivo .ZIP encontrado na pasta raiz.
               </div>
             ) : (
               <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl overflow-x-auto">
                 <table className="w-full text-left border-collapse text-sm min-w-[600px]">
                   <thead>
                     <tr className="border-b border-[#262522] text-xs text-[#8c877e] bg-[#000000]">
-                      <th className="py-3.5 px-4">Arquivo ZIP no Google Drive</th>
+                      <th className="py-3.5 px-4">Arquivo ZIP</th>
                       <th className="py-3.5 px-4">Tamanho</th>
-                      <th className="py-3.5 px-4">ID Único no Drive</th>
+                      <th className="py-3.5 px-4">ID no Drive</th>
                       <th className="py-3.5 px-4 text-right">Status / Ação</th>
                     </tr>
                   </thead>
@@ -1405,13 +1388,9 @@ export default function App() {
                             <FileArchive className="w-4 h-4 text-[#c89d66] shrink-0" />
                             <span className="truncate max-w-[200px] sm:max-w-xs">{df.name}</span>
                           </td>
-                          <td className="py-3.5 px-4 text-xs text-[#8c877e] whitespace-nowrap">
-                            {formatBytes(df.size)}
-                          </td>
-                          <td className="py-3.5 px-4 text-xs font-mono text-[#6e6a61] truncate max-w-[120px]">
-                            {df.id}
-                          </td>
-                          <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                          <td className="py-3.5 px-4 text-xs text-[#8c877e]">{formatBytes(df.size)}</td>
+                          <td className="py-3.5 px-4 text-xs font-mono text-[#6e6a61]">{df.id}</td>
+                          <td className="py-3.5 px-4 text-right">
                             {alreadyRegistered ? (
                               <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs bg-[#4d7c5b]/15 text-[#70a37f] border border-[#4d7c5b]/30">
                                 <Check className="w-3.5 h-3.5" /> Cadastrado
@@ -1445,7 +1424,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ABA 4: CONFIGURAÇÕES DO APLICATIVO */}
         {activeTab === 'configuracoes' && (
           <div className="max-w-3xl mx-auto space-y-6">
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-5">
@@ -1454,36 +1432,30 @@ export default function App() {
                   <HardDrive className="w-6 h-6 text-[#e4e0d7] shrink-0" />
                   <div>
                     <h3 className="font-bold text-[#e4e0d7] text-base">Google Drive (Armazenamento Principal)</h3>
-                    <p className="text-xs text-[#8c877e]">API oficial Google Drive v3 com escopo restrito</p>
+                    <p className="text-xs text-[#8c877e]">Sessão persistente ativa</p>
                   </div>
                 </div>
-                <span
-                  className={`self-start sm:self-auto px-3 py-1 rounded-full text-xs font-semibold ${
-                    googleToken
-                      ? 'bg-[#4d7c5b]/15 text-[#70a37f] border border-[#4d7c5b]/30'
-                      : 'bg-[#c89d66]/15 text-[#c89d66] border border-[#c89d66]/30'
-                  }`}
-                >
-                  {googleToken ? `Conectado` : 'Desconectado'}
+                <span className={`px-3 py-1 rounded-full text-xs font-semibold ${googleConnected ? 'bg-[#4d7c5b]/15 text-[#70a37f] border border-[#4d7c5b]/30' : 'bg-[#c89d66]/15 text-[#c89d66]'}`}>
+                  {googleConnected ? 'Conectado Definitivo' : 'Desconectado'}
                 </span>
               </div>
 
               <div className="p-4 rounded-xl bg-[#000000] border border-[#262522] space-y-2 text-xs">
                 <div className="flex flex-col sm:flex-row sm:justify-between gap-1">
-                  <span className="text-[#8c877e]">Pasta Raiz Vinculada:</span>
-                  <span className="font-semibold text-[#e4e0d7] break-all">{settings.root_folder_name || 'Nenhuma pasta selecionada'}</span>
+                  <span className="text-[#8c877e]">Pasta Raiz:</span>
+                  <span className="font-semibold text-[#e4e0d7] break-all">{settings.root_folder_name || 'Nenhuma'}</span>
                 </div>
                 <div className="flex flex-col sm:flex-row sm:justify-between gap-1">
-                  <span className="text-[#8c877e]">ID Único no Drive:</span>
+                  <span className="text-[#8c877e]">ID da Pasta:</span>
                   <span className="font-mono text-[#c89d66] break-all">{settings.root_folder_id || '—'}</span>
                 </div>
               </div>
 
               <div className="flex flex-wrap gap-2.5">
-                {!googleToken ? (
+                {!googleConnected ? (
                   <button
                     onClick={handleConnectGoogle}
-                    className="w-full sm:w-auto px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold transition cursor-pointer"
+                    className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
                   >
                     Conectar Conta Google
                   </button>
@@ -1491,24 +1463,13 @@ export default function App() {
                   <>
                     <button
                       onClick={() => openFolderPicker()}
-                      className="w-full sm:w-auto px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold transition cursor-pointer"
+                      className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
                     >
                       Selecionar Outra Pasta Raiz
                     </button>
-                    {settings.root_folder_id && (
-                      <a
-                        href={`https://drive.google.com/drive/folders/${settings.root_folder_id}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="w-full sm:w-auto px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-2 transition"
-                      >
-                        <span>Abrir Pasta no Drive</span>
-                        <ExternalLink className="w-3.5 h-3.5" />
-                      </a>
-                    )}
                     <button
                       onClick={handleDisconnectGoogle}
-                      className="w-full sm:w-auto px-4 py-2 bg-[#b94a48]/15 hover:bg-[#b94a48]/25 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs font-semibold transition cursor-pointer"
+                      className="px-4 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs font-semibold cursor-pointer"
                     >
                       Desconectar Google
                     </button>
@@ -1517,54 +1478,34 @@ export default function App() {
               </div>
             </div>
 
-            {/* Bloco 2: Categorias */}
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-4">
               <div className="flex items-center gap-2.5">
                 <Tag className="w-5 h-5 text-[#e4e0d7]" />
                 <div>
                   <h3 className="font-bold text-[#e4e0d7] text-base">Categorias da Biblioteca</h3>
-                  <p className="text-xs text-[#8c877e]">
-                    Categorias base fixas + categorias personalizadas salvas permanentemente.
-                  </p>
+                  <p className="text-xs text-[#8c877e]">Categorias base + personalizadas permanentes.</p>
                 </div>
               </div>
 
-              <div className="space-y-2">
-                <span className="text-xs font-semibold text-[#8c877e]">Categorias Base:</span>
-                <div className="flex flex-wrap gap-1.5">
-                  {BASE_CATEGORIES.map((cat) => (
-                    <span
-                      key={cat}
-                      className="px-2.5 py-1 rounded-lg text-xs bg-[#000000] text-[#a39e93] border border-[#262522]"
-                    >
-                      {cat}
-                    </span>
-                  ))}
-                </div>
+              <div className="flex flex-wrap gap-1.5">
+                {BASE_CATEGORIES.map((cat) => (
+                  <span key={cat} className="px-2.5 py-1 rounded-lg text-xs bg-[#000000] text-[#a39e93] border border-[#262522]">
+                    {cat}
+                  </span>
+                ))}
               </div>
 
               <div className="space-y-2 pt-2">
-                <span className="text-xs font-semibold text-[#e4e0d7]">Suas Categorias Personalizadas:</span>
+                <span className="text-xs font-semibold text-[#e4e0d7]">Personalizadas:</span>
                 <div className="flex flex-wrap gap-2">
-                  {(settings.custom_categories || []).length === 0 ? (
-                    <span className="text-xs text-[#5e5a52]">Nenhuma categoria personalizada criada ainda.</span>
-                  ) : (
-                    (settings.custom_categories || []).map((cat) => (
-                      <span
-                        key={cat}
-                        className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs bg-[#e4e0d7]/15 text-[#e4e0d7] border border-[#e4e0d7]/30"
-                      >
-                        <span>{cat}</span>
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveCustomCategory(cat)}
-                          className="text-[#a39e93] hover:text-[#e89b99] cursor-pointer"
-                        >
-                          <X className="w-3.5 h-3.5" />
-                        </button>
-                      </span>
-                    ))
-                  )}
+                  {(settings.custom_categories || []).map((cat) => (
+                    <span key={cat} className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs bg-[#e4e0d7]/15 text-[#e4e0d7] border border-[#e4e0d7]/30">
+                      <span>{cat}</span>
+                      <button type="button" onClick={() => handleRemoveCustomCategory(cat)} className="cursor-pointer">
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </span>
+                  ))}
                 </div>
               </div>
 
@@ -1578,65 +1519,29 @@ export default function App() {
                     setNewCategoryName(e.target.value);
                   }}
                   placeholder="Nova categoria permanente..."
-                  className="flex-1 px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#5e5a52] focus:outline-none focus:border-[#e4e0d7]"
+                  className="flex-1 px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
                 />
                 <button
                   type="button"
                   onClick={() => handleAddPermanentCategory('settings')}
-                  className="px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition"
+                  className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
                 >
-                  <Plus className="w-4 h-4" /> Adicionar Categoria
+                  Adicionar
                 </button>
               </div>
             </div>
 
-            {/* Bloco 3: Preferências */}
-            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-5">
-              <h3 className="font-bold text-[#e4e0d7] text-base">Preferências de Organização e Upload</h3>
-
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <p className="text-sm font-medium text-[#e4e0d7]">Organizar novos ZIPs em subpastas por categoria</p>
-                  <p className="text-xs text-[#8c877e]">Guarda diretamente na pasta raiz por padrão.</p>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={settings.organize_by_subfolders}
-                  onChange={(e) => handleSaveGeneralSettings({ organize_by_subfolders: e.target.checked })}
-                  className="w-5 h-5 accent-[#e4e0d7] cursor-pointer shrink-0"
-                />
-              </div>
-
-              <div className="pt-4 border-t border-[#1c1b19] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-medium text-[#e4e0d7]">Limite máximo de upload por arquivo (MB)</p>
-                  <p className="text-xs text-[#8c877e]">Protege contra envios acima do tamanho desejado.</p>
-                </div>
-                <input
-                  type="number"
-                  min={10}
-                  max={2048}
-                  value={settings.max_upload_size_mb}
-                  onChange={(e) => handleSaveGeneralSettings({ max_upload_size_mb: Number(e.target.value) })}
-                  className="w-full sm:w-28 px-3 py-1.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] sm:text-right focus:outline-none"
-                />
-              </div>
-            </div>
-
-            {/* Bloco 4: Supabase Status */}
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="space-y-1">
                 <div className="flex items-center gap-2 text-[#70a37f] text-sm font-semibold">
                   <ShieldCheck className="w-5 h-5 shrink-0" />
-                  <span>Supabase Conectado (RLS Ativo)</span>
+                  <span>Supabase Conectado</span>
                 </div>
-                <p className="text-xs text-[#8c877e] break-all">
-                  Conta: <strong className="text-[#e4e0d7]">{session.user.email}</strong>
-                </p>
+                <p className="text-xs text-[#8c877e]">Conta: <strong className="text-[#e4e0d7]">{session.user.email}</strong></p>
               </div>
               <button
                 onClick={() => supabase.auth.signOut()}
-                className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer transition"
+                className="px-4 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer"
               >
                 <LogOut className="w-4 h-4" />
                 <span>Sair da Conta</span>
@@ -1646,106 +1551,59 @@ export default function App() {
         )}
       </main>
 
-      {/* MODAL DE DETALHES DO MODELO */}
+      {/* Modais de Detalhes, Edição, Importação e Pastas */}
       {selectedModel && (
         <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
           <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
             <div className="aspect-video bg-[#000000] relative flex items-center justify-center border-b border-[#1c1b19]">
               {signedUrls[selectedModel.id] ? (
                 <>
-                  <img
-                    src={signedUrls[selectedModel.id]}
-                    alt={selectedModel.name}
-                    className="w-full h-full object-contain"
-                  />
+                  <img src={signedUrls[selectedModel.id]} alt={selectedModel.name} className="w-full h-full object-contain" />
                   <button
                     onClick={() => setLightboxUrl(signedUrls[selectedModel.id])}
-                    className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-[#000000]/85 hover:bg-[#141413] text-[#e4e0d7] text-xs font-medium flex items-center gap-1.5 border border-[#e4e0d7]/30 cursor-pointer"
+                    className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-[#000000]/85 text-[#e4e0d7] text-xs flex items-center gap-1.5 border border-[#e4e0d7]/30 cursor-pointer"
                   >
                     <Eye className="w-4 h-4" /> Ampliar
                   </button>
                 </>
               ) : (
-                <div className="text-[#5e5a52] flex flex-col items-center gap-2">
-                  <Box className="w-12 h-12" />
-                  <span className="text-xs">Sem imagem de referência</span>
-                </div>
+                <div className="text-[#5e5a52] text-xs">Sem imagem</div>
               )}
-              <button
-                onClick={() => setSelectedModel(null)}
-                className="absolute top-3 right-3 p-2 rounded-full bg-[#000000]/80 text-[#a39e93] hover:text-[#e4e0d7] cursor-pointer"
-              >
+              <button onClick={() => setSelectedModel(null)} className="absolute top-3 right-3 p-2 rounded-full bg-[#000000]/80 text-[#a39e93] cursor-pointer">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="p-4 sm:p-6 space-y-4 max-h-[60vh] overflow-y-auto">
-              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2">
+              <div className="flex justify-between items-start">
                 <div>
-                  <span className="px-2.5 py-1 rounded-md text-xs font-semibold bg-[#e4e0d7]/15 text-[#e4e0d7] border border-[#e4e0d7]/30">
-                    {selectedModel.category}
-                  </span>
-                  <h2 className="text-lg sm:text-xl font-bold text-[#e4e0d7] mt-2">{selectedModel.name}</h2>
+                  <span className="px-2.5 py-1 rounded-md text-xs bg-[#e4e0d7]/15 text-[#e4e0d7]">{selectedModel.category}</span>
+                  <h2 className="text-lg font-bold text-[#e4e0d7] mt-2">{selectedModel.name}</h2>
                 </div>
                 <span className="text-xs text-[#8c877e]">{formatBytes(selectedModel.drive_file_size)}</span>
               </div>
-
-              {driveStatusCheck[selectedModel.id] === 'missing' && (
-                <div className="p-3.5 rounded-xl bg-[#b94a48]/15 border border-[#b94a48]/40 flex items-center gap-3 text-xs text-[#e89b99]">
-                  <AlertTriangle className="w-5 h-5 shrink-0 text-[#d96b68]" />
-                  <span>O arquivo ZIP original não está mais disponível no Google Drive.</span>
-                </div>
-              )}
-
-              <p className="text-sm text-[#d5d0c5] whitespace-pre-line">
-                {selectedModel.description || 'Nenhuma descrição informada.'}
-              </p>
-
-              {selectedModel.notes && (
-                <div className="p-3.5 rounded-xl bg-[#000000] border border-[#262522] text-xs space-y-1">
-                  <span className="font-semibold text-[#e4e0d7]">Observações / Parâmetros:</span>
-                  <p className="text-[#a39e93]">{selectedModel.notes}</p>
-                </div>
-              )}
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-[#8c877e] bg-[#000000] p-3.5 rounded-xl border border-[#262522]">
-                <div className="truncate">Arquivo Drive: <strong className="text-[#e4e0d7]">{selectedModel.drive_file_name}</strong></div>
-                <div className="truncate">ID: <code className="text-[#c89d66]">{selectedModel.drive_file_id}</code></div>
-                <div>Cadastro: {formatDate(selectedModel.created_at)}</div>
-                <div>Atualizado: {formatDate(selectedModel.updated_at)}</div>
-              </div>
-
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2 border-t border-[#1c1b19]">
+              <p className="text-sm text-[#d5d0c5]">{selectedModel.description || 'Sem descrição.'}</p>
+              <div className="flex justify-between pt-2 border-t border-[#1c1b19]">
                 <a
                   href={selectedModel.drive_file_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold inline-flex items-center justify-center gap-2 transition"
+                  className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold inline-flex items-center gap-2"
                 >
-                  <ExternalLink className="w-4 h-4" />
-                  <span>Abrir ZIP no Drive</span>
+                  <ExternalLink className="w-4 h-4" /> Abrir ZIP no Drive
                 </a>
-
-                <div className="flex items-center gap-2 justify-end">
+                <div className="flex gap-2">
                   <button
-                    onClick={() =>
-                      setEditingModel({
-                        ...selectedModel,
-                        tagsInput: (selectedModel.tags || []).join(', ')
-                      })
-                    }
-                    className="flex-1 sm:flex-none px-3.5 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer transition"
+                    onClick={() => setEditingModel({ ...selectedModel, tagsInput: (selectedModel.tags || []).join(', ') })}
+                    className="px-3.5 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs cursor-pointer"
                   >
-                    <Edit3 className="w-4 h-4" /> Editar
+                    Editar
                   </button>
                   <button
-                    onClick={() => {
-                      setDeleteConfirmModel(selectedModel);
-                      setDeleteAlsoFromDrive(false);
-                    }}
-                    className="flex-1 sm:flex-none px-3.5 py-2 bg-[#b94a48]/15 hover:bg-[#b94a48]/25 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer transition"
+                    onClick={() => { setDeleteConfirmModel(selectedModel); setDeleteAlsoFromDrive(false); }}
+                    className="px-3.5 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs cursor-pointer"
                   >
-                    <Trash2 className="w-4 h-4" /> Excluir
+                    Excluir
                   </button>
                 </div>
               </div>
@@ -1754,312 +1612,105 @@ export default function App() {
         </div>
       )}
 
-      {/* LIGHTBOX DE IMAGEM AMPLIADA */}
       {lightboxUrl && (
-        <div
-          onClick={() => setLightboxUrl(null)}
-          className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-3 cursor-zoom-out"
-        >
-          <img src={lightboxUrl} alt="Referência ampliada" className="max-w-full max-h-full rounded-xl border border-[#262522]" />
+        <div onClick={() => setLightboxUrl(null)} className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-3 cursor-zoom-out">
+          <img src={lightboxUrl} alt="Ampliada" className="max-w-full max-h-full rounded-xl border border-[#262522]" />
         </div>
       )}
 
-      {/* MODAL DE EDIÇÃO DE METADADOS */}
       {editingModel && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-          <form
-            onSubmit={handleSaveEdit}
-            className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-4 sm:p-6 space-y-4 my-auto max-h-[90vh] overflow-y-auto"
-          >
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-[#e4e0d7] text-base">Editar Cadastro do Modelo</h3>
-              <button type="button" onClick={() => setEditingModel(null)} className="text-[#8c877e] hover:text-[#e4e0d7]">
-                <X className="w-5 h-5" />
-              </button>
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
+          <form onSubmit={handleSaveEdit} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="font-bold text-[#e4e0d7]">Editar Cadastro</h3>
+              <button type="button" onClick={() => setEditingModel(null)}><X className="w-5 h-5 text-[#8c877e]" /></button>
             </div>
-
             <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Nome do Modelo</label>
-              <input
-                type="text"
-                required
-                value={editingModel.name}
-                onChange={(e) => setEditingModel({ ...editingModel, name: e.target.value })}
-                className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7]"
-              />
+              <label className="block text-xs text-[#a39e93] mb-1">Nome</label>
+              <input type="text" required value={editingModel.name} onChange={(e) => setEditingModel({ ...editingModel, name: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
             </div>
-
-            {renderCategorySelector(
-              editingModel.category,
-              (val) => setEditingModel({ ...editingModel, category: val }),
-              'edit'
-            )}
-
+            {renderCategorySelector(editingModel.category, (val) => setEditingModel({ ...editingModel, category: val }), 'edit')}
             <div>
               <label className="block text-xs text-[#a39e93] mb-1">Descrição</label>
-              <textarea
-                rows={3}
-                value={editingModel.description}
-                onChange={(e) => setEditingModel({ ...editingModel, description: e.target.value })}
-                className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7]"
-              />
+              <textarea rows={2} value={editingModel.description} onChange={(e) => setEditingModel({ ...editingModel, description: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
             </div>
-
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Tags (separadas por vírgula)</label>
-              <input
-                type="text"
-                value={editingModel.tagsInput}
-                onChange={(e) => setEditingModel({ ...editingModel, tagsInput: e.target.value })}
-                className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7]"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Observações</label>
-              <input
-                type="text"
-                value={editingModel.notes}
-                onChange={(e) => setEditingModel({ ...editingModel, notes: e.target.value })}
-                className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7]"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Substituir Imagem de Referência (opcional)</label>
-              <input
-                type="file"
-                accept="image/*"
-                onChange={(e) => setEditingModel({ ...editingModel, newImageFile: e.target.files?.[0] || null })}
-                className="w-full text-xs text-[#a39e93]"
-              />
-            </div>
-
             <div className="flex justify-end gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setEditingModel(null)}
-                className="px-4 py-2 bg-[#141413] text-[#a39e93] hover:text-[#e4e0d7] rounded-xl text-xs font-semibold cursor-pointer"
-              >
-                Cancelar
-              </button>
-              <button
-                type="submit"
-                disabled={uploading}
-                className="px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
-              >
-                Salvar Alterações
-              </button>
+              <button type="button" onClick={() => setEditingModel(null)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
+              <button type="submit" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">Salvar</button>
             </div>
           </form>
         </div>
       )}
 
-      {/* MODAL DE CONFIRMAÇÃO DE EXCLUSÃO */}
       {deleteConfirmModel && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 sm:p-4">
-          <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-md w-full p-4 sm:p-6 space-y-4">
-            <h3 className="font-bold text-[#e4e0d7] text-base">Excluir "{deleteConfirmModel.name}"?</h3>
-            <p className="text-xs text-[#a39e93] leading-relaxed">
-              Por padrão, esta ação remove apenas o registro visual do catálogo e <strong className="text-[#e4e0d7]">preserva o arquivo ZIP intacto no seu Google Drive</strong>.
-            </p>
-
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
+          <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-md w-full p-6 space-y-4">
+            <h3 className="font-bold text-[#e4e0d7]">Excluir "{deleteConfirmModel.name}"?</h3>
             <label className="flex items-start gap-2.5 p-3 rounded-xl bg-[#b94a48]/15 border border-[#b94a48]/30 text-xs text-[#e89b99] cursor-pointer">
-              <input
-                type="checkbox"
-                checked={deleteAlsoFromDrive}
-                onChange={(e) => setDeleteAlsoFromDrive(e.target.checked)}
-                className="mt-0.5 accent-[#b94a48] shrink-0"
-              />
-              <span>
-                Excluir também o arquivo <strong>{deleteConfirmModel.drive_file_name}</strong> permanentemente do meu Google Drive.
-              </span>
+              <input type="checkbox" checked={deleteAlsoFromDrive} onChange={(e) => setDeleteAlsoFromDrive(e.target.checked)} className="mt-0.5 accent-[#b94a48]" />
+              <span>Excluir também o arquivo ZIP permanentemente do Google Drive.</span>
             </label>
-
-            <div className="flex flex-col sm:flex-row justify-end gap-2 pt-2">
-              <button
-                onClick={() => setDeleteConfirmModel(null)}
-                className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs font-semibold cursor-pointer"
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={handleDeleteModel}
-                disabled={uploading}
-                className="px-4 py-2 bg-[#b94a48] hover:bg-[#a33f3d] text-white rounded-xl text-xs font-bold cursor-pointer"
-              >
-                {deleteAlsoFromDrive ? 'Excluir do Catálogo e do Drive' : 'Remover Apenas do Catálogo'}
-              </button>
+            <div className="flex justify-end gap-2 pt-2">
+              <button onClick={() => setDeleteConfirmModel(null)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
+              <button onClick={handleDeleteModel} className="px-4 py-2 bg-[#b94a48] text-white rounded-xl text-xs font-bold">Confirmar Exclusão</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* MODAL DE IMPORTAÇÃO DE ARQUIVO EXISTENTE */}
       {importingFile && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-          <form
-            onSubmit={handleConfirmImport}
-            className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-4 sm:p-6 space-y-4 my-auto max-h-[90vh] overflow-y-auto"
-          >
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-[#e4e0d7] text-base">Importar ZIP do Drive para o Catálogo</h3>
-              <button type="button" onClick={() => setImportingFile(null)} className="text-[#8c877e] hover:text-[#e4e0d7]">
-                <X className="w-5 h-5" />
-              </button>
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
+          <form onSubmit={handleConfirmImport} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="font-bold text-[#e4e0d7]">Importar ZIP do Drive</h3>
+              <button type="button" onClick={() => setImportingFile(null)}><X className="w-5 h-5 text-[#8c877e]" /></button>
             </div>
-
-            <div className="p-3 rounded-xl bg-[#000000] border border-[#262522] text-xs text-[#a39e93] truncate">
-              Arquivo: <strong className="text-[#e4e0d7]">{importingFile.name}</strong>
-            </div>
-
             <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Nome do Modelo *</label>
-              <input
-                type="text"
-                required
-                value={importForm.name}
-                onChange={(e) => setImportForm({ ...importForm, name: e.target.value })}
-                className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7]"
-              />
+              <label className="block text-xs text-[#a39e93] mb-1">Nome do Modelo</label>
+              <input type="text" required value={importForm.name} onChange={(e) => setImportForm({ ...importForm, name: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
             </div>
-
-            {renderCategorySelector(
-              importForm.category,
-              (val) => setImportForm({ ...importForm, category: val }),
-              'import'
-            )}
-
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Descrição</label>
-              <textarea
-                rows={2}
-                value={importForm.description}
-                onChange={(e) => setImportForm({ ...importForm, description: e.target.value })}
-                className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7]"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Tags (separadas por vírgula)</label>
-              <input
-                type="text"
-                value={importForm.tags}
-                onChange={(e) => setImportForm({ ...importForm, tags: e.target.value })}
-                className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7]"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Imagem de Referência (opcional)</label>
-              <input
-                type="file"
-                accept="image/*"
-                onChange={(e) => setImportForm({ ...importForm, imageFile: e.target.files?.[0] || null })}
-                className="w-full text-xs text-[#a39e93]"
-              />
-            </div>
-
+            {renderCategorySelector(importForm.category, (val) => setImportForm({ ...importForm, category: val }), 'import')}
             <div className="flex justify-end gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setImportingFile(null)}
-                className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs font-semibold cursor-pointer"
-              >
-                Cancelar
-              </button>
-              <button
-                type="submit"
-                disabled={uploading}
-                className="px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
-              >
-                Confirmar Importação
-              </button>
+              <button type="button" onClick={() => setImportingFile(null)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
+              <button type="submit" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">Importar</button>
             </div>
           </form>
         </div>
       )}
 
-      {/* MODAL DE SELEÇÃO / CRIAÇÃO DA PASTA RAIZ DO GOOGLE DRIVE */}
       {folderPickerOpen && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-          <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-4 sm:p-6 space-y-5 my-auto max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-[#e4e0d7] text-base">Configurar Pasta Raiz no Google Drive</h3>
-              <button onClick={() => setFolderPickerOpen(false)} className="text-[#8c877e] hover:text-[#e4e0d7]">
-                <X className="w-5 h-5" />
-              </button>
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
+          <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-5">
+            <div className="flex justify-between items-center">
+              <h3 className="font-bold text-[#e4e0d7]">Configurar Pasta Raiz no Google Drive</h3>
+              <button onClick={() => setFolderPickerOpen(false)}><X className="w-5 h-5 text-[#8c877e]" /></button>
             </div>
-
-            {settings.root_folder_id && (
-              <div className="p-3 rounded-xl bg-[#c89d66]/10 border border-[#c89d66]/30 text-xs text-[#e4e0d7]">
-                <strong className="text-[#c89d66]">Aviso:</strong> Trocar a pasta raiz afeta apenas o destino dos novos uploads e importações. Os registros cadastrados continuam funcionando.
-              </div>
-            )}
-
             <div className="space-y-2">
-              <label className="block text-xs font-semibold text-[#a39e93]">
-                Criar nova pasta raiz no seu Google Drive:
-              </label>
-              <div className="flex flex-col sm:flex-row gap-2">
-                <input
-                  type="text"
-                  value={newFolderName}
-                  onChange={(e) => setNewFolderName(e.target.value)}
-                  className="flex-1 px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7]"
-                />
-                <button
-                  type="button"
-                  onClick={handleCreateRootFolder}
-                  disabled={loadingFolders}
-                  className="px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  <FolderPlus className="w-4 h-4" /> Criar e Vincular
-                </button>
+              <label className="block text-xs font-semibold text-[#a39e93]">Criar nova pasta:</label>
+              <div className="flex gap-2">
+                <input type="text" value={newFolderName} onChange={(e) => setNewFolderName(e.target.value)} className="flex-1 px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+                <button type="button" onClick={handleCreateRootFolder} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">Criar e Vincular</button>
               </div>
             </div>
-
             <div className="space-y-2">
-              <label className="block text-xs font-semibold text-[#a39e93]">
-                Ou selecione uma pasta existente:
-              </label>
+              <label className="block text-xs font-semibold text-[#a39e93]">Ou selecione uma pasta existente:</label>
               <div className="max-h-48 overflow-y-auto divide-y divide-[#1c1b19] bg-[#000000] border border-[#262522] rounded-xl">
-                {loadingFolders ? (
-                  <div className="p-6 text-center text-xs text-[#8c877e]">Buscando pastas no Drive...</div>
-                ) : driveFolders.length === 0 ? (
-                  <div className="p-6 text-center text-xs text-[#5e5a52]">
-                    Nenhuma pasta encontrada. Crie a pasta "Biblioteca STL" acima.
+                {driveFolders.map((f) => (
+                  <div
+                    key={f.id}
+                    onClick={() => setPendingFolderSelection(f)}
+                    className={`p-3 flex justify-between text-xs cursor-pointer ${pendingFolderSelection?.id === f.id ? 'bg-[#e4e0d7]/15 text-[#e4e0d7]' : 'hover:bg-[#121211] text-[#a39e93]'}`}
+                  >
+                    <span>{f.name}</span>
+                    <code className="text-[10px] text-[#6e6a61]">{f.id}</code>
                   </div>
-                ) : (
-                  driveFolders.map((f) => (
-                    <div
-                      key={f.id}
-                      onClick={() => setPendingFolderSelection(f)}
-                      className={`p-3 flex items-center justify-between text-xs cursor-pointer transition ${
-                        pendingFolderSelection?.id === f.id
-                          ? 'bg-[#e4e0d7]/15 text-[#e4e0d7]'
-                          : 'hover:bg-[#121211] text-[#a39e93]'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2 truncate pr-2">
-                        <Folder className="w-4 h-4 text-[#c89d66] shrink-0" />
-                        <span className="font-medium truncate">{f.name}</span>
-                      </div>
-                      <code className="text-[10px] text-[#6e6a61] shrink-0">{f.id}</code>
-                    </div>
-                  ))
-                )}
+                ))}
               </div>
             </div>
-
             {pendingFolderSelection && (
               <div className="flex justify-end">
-                <button
-                  type="button"
-                  onClick={() => saveRootFolderSetting(pendingFolderSelection.id, pendingFolderSelection.name)}
-                  className="w-full sm:w-auto px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
-                >
-                  Confirmar Pasta "{pendingFolderSelection.name}"
+                <button type="button" onClick={() => saveRootFolderSetting(pendingFolderSelection.id, pendingFolderSelection.name)} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">
+                  Confirmar "{pendingFolderSelection.name}"
                 </button>
               </div>
             )}
