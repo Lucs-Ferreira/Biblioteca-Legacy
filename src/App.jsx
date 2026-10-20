@@ -1010,8 +1010,12 @@ export default function App() {
       <header className="border-b border-[#1f1e1c] bg-[#000000]/95 backdrop-blur sticky top-0 z-30">
         <div className="max-w-7xl mx-auto px-3 sm:px-6 h-16 flex items-center justify-between gap-2 sm:gap-4">
           <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-xl bg-[#e4e0d7] text-[#000000]">
-              <Box className="w-5 h-5" />
+            <div className="w-10 h-10 rounded-xl overflow-hidden bg-[#e4e0d7] flex items-center justify-center border border-[#262522]">
+              <img
+                src="/logo.png"
+                alt="Biblioteca STL Logo"
+                className="w-full h-full object-cover"
+              />
             </div>
             <div>
               <h1 className="font-bold text-base sm:text-lg text-[#e4e0d7] leading-tight tracking-tight">Biblioteca STL</h1>
