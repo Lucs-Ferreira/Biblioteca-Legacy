@@ -6,7 +6,7 @@ import {
   HardDrive, ShieldCheck, RefreshCw, X, Check, FileArchive,
   LogOut, FolderPlus, Tag
 } from 'lucide-react';
-import logoImg from './assets/Logo_Legacy.png';
+import logoImg from './assets/logo.png';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
