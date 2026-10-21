@@ -4,7 +4,7 @@ import {
   Box, Upload, FolderDown, Settings, Search, Plus, ExternalLink,
   Trash2, Edit3, Eye, CheckCircle2, AlertTriangle, Folder,
   HardDrive, ShieldCheck, RefreshCw, X, Check, FileArchive,
-  LogOut, FolderPlus, Tag, Calculator, Cpu, Layers, Menu
+  LogOut, FolderPlus, Tag, Calculator, Menu
 } from 'lucide-react';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
@@ -62,7 +62,6 @@ export default function App() {
   const tokenClientRef = useRef(null);
   const autoSyncedRef = useRef(false);
 
-  // Estado do Menu Responsivo (Hambúrguer)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const [settings, setSettings] = useState({
@@ -85,7 +84,6 @@ export default function App() {
   const [savingCategory, setSavingCategory] = useState(false);
   const [syncingCategoryFolders, setSyncingCategoryFolders] = useState(false);
 
-  // Dados da Calculadora
   const [materials, setMaterials] = useState([]);
   const [printers, setPrinters] = useState([]);
   const [calcForm, setCalcForm] = useState({
@@ -122,7 +120,31 @@ export default function App() {
   const [newFolderName, setNewFolderName] = useState('Biblioteca STL');
   const [pendingFolderSelection, setPendingFolderSelection] = useState(null);
 
-  // Estados de Cadastro na Calculadora (Modais internos)
+  const [uploadForm, setUploadForm] = useState({
+    name: '',
+    description: '',
+    category: 'Geral',
+    tags: '',
+    notes: '',
+    zipFile: null,
+    imageFile: null
+  });
+  const [uploading, setUploading] = useState(false);
+  const [uploadStep, setUploadStep] = useState('');
+  const [pendingRecovery, setPendingRecovery] = useState(null);
+
+  const [driveZipFiles, setDriveZipFiles] = useState([]);
+  const [loadingDriveZips, setLoadingDriveZips] = useState(false);
+  const [importingFile, setImportingFile] = useState(null);
+  const [importForm, setImportForm] = useState({
+    name: '',
+    description: '',
+    category: 'Geral',
+    tags: '',
+    notes: '',
+    imageFile: null
+  });
+
   const [newMaterialModal, setNewMaterialModal] = useState(false);
   const [matForm, setMatForm] = useState({ type: 'Filamento', name: '', color: 'Preto', price_per_unit: 80 });
 
@@ -251,10 +273,21 @@ export default function App() {
         const dbCats = Array.isArray(cfg.custom_categories) ? cfg.custom_categories : [];
         const mergedCats = Array.from(new Set([...dbCats, ...localCachedCats]));
 
+        const migrationDone = localStorage.getItem(`stl_subfolders_migrated_${session.user.id}`);
+        let shouldUseSubfolders = cfg.organize_by_subfolders ?? true;
+        if (!migrationDone) {
+          shouldUseSubfolders = true;
+          localStorage.setItem(`stl_subfolders_migrated_${session.user.id}`, 'true');
+          await supabase
+            .from('user_settings')
+            .update({ organize_by_subfolders: true })
+            .eq('user_id', session.user.id);
+        }
+
         setSettings({
           root_folder_id: cfg.root_folder_id || '',
           root_folder_name: cfg.root_folder_name || '',
-          organize_by_subfolders: cfg.organize_by_subfolders ?? true,
+          organize_by_subfolders: shouldUseSubfolders,
           max_upload_size_mb: cfg.max_upload_size_mb || 150,
           custom_categories: mergedCats,
           energy_cost_kwh: cfg.energy_cost_kwh ?? 0.95,
@@ -281,14 +314,12 @@ export default function App() {
         setSettings((prev) => ({ ...prev, custom_categories: localCachedCats, organize_by_subfolders: true }));
       }
 
-      // Carrega Modelos
       const { data: modelList } = await supabase
         .from('stl_models')
         .select('*')
         .order('created_at', { ascending: false });
       setModels(modelList || []);
 
-      // Carrega Materiais
       const { data: matList } = await supabase
         .from('stl_materials')
         .select('*')
@@ -298,7 +329,6 @@ export default function App() {
         setCalcForm((prev) => ({ ...prev, materialId: matList[0].id }));
       }
 
-      // Carrega Impressoras
       const { data: printList } = await supabase
         .from('stl_printers')
         .select('*')
@@ -487,7 +517,9 @@ export default function App() {
 
     if (!createRes.ok) {
       const errBody = await createRes.json().catch(() => ({}));
-      throw new Error(errBody?.error?.message || `Não foi possível criar a subpasta "${trimmedCategory}" no Drive.`);
+      throw new Error(
+        errBody?.error?.message || `Não foi possível criar a subpasta "${trimmedCategory}" no Google Drive.`
+      );
     }
     const created = await createRes.json();
     setExistingSubfolders((prev) => [...prev, created]);
@@ -496,7 +528,10 @@ export default function App() {
 
   const handleSyncAllCategorySubfolders = async (rootIdOverride, silent = false) => {
     const rootId = rootIdOverride || settings.root_folder_id;
-    if (!rootId) return;
+    if (!rootId) {
+      if (!silent) showToast('Selecione uma pasta raiz primeiro.', 'error');
+      return;
+    }
 
     setSyncingCategoryFolders(true);
     try {
@@ -515,7 +550,11 @@ export default function App() {
 
       await fetchRootSubfolders(rootId);
       if (!silent || createdCount > 0) {
-        showToast(createdCount > 0 ? `${createdCount} subpasta(s) criada(s)!` : 'Subpastas sincronizadas!');
+        showToast(
+          createdCount > 0
+            ? `${createdCount} subpasta(s) de categoria criada(s) com sucesso!`
+            : `Todas as subpastas de categorias estão montadas no Google Drive!`
+        );
       }
     } catch (err) {
       if (!silent) showToast(`Erro ao montar subpastas: ${err.message}`, 'error');
@@ -537,7 +576,7 @@ export default function App() {
     if (!trimmed) return;
 
     if (allCategories.some((c) => c.toLowerCase() === trimmed.toLowerCase())) {
-      showToast('Essa categoria já existe!', 'error');
+      showToast('Essa categoria já existe na lista!', 'error');
       return;
     }
 
@@ -569,18 +608,22 @@ export default function App() {
         await ensureCategorySubfolderInDrive(trimmed);
         await fetchRootSubfolders(settings.root_folder_id);
       } catch (err) {
-        console.warn('Erro subpasta:', err);
+        console.warn('Erro ao criar subpasta automática:', err);
       }
     }
 
-    if (targetContext === 'upload') setUploadForm((prev) => ({ ...prev, category: trimmed }));
-    else if (targetContext === 'import') setImportForm((prev) => ({ ...prev, category: trimmed }));
-    else if (targetContext === 'edit' && editingModel) setEditingModel((prev) => ({ ...prev, category: trimmed }));
+    if (targetContext === 'upload') {
+      setUploadForm((prev) => ({ ...prev, category: trimmed }));
+    } else if (targetContext === 'import') {
+      setImportForm((prev) => ({ ...prev, category: trimmed }));
+    } else if (targetContext === 'edit' && editingModel) {
+      setEditingModel((prev) => ({ ...prev, category: trimmed }));
+    }
 
     setNewCategoryName('');
     setAddingCategoryContext(null);
     setSavingCategory(false);
-    showToast(`Categoria "${trimmed}" adicionada!`);
+    showToast(`Categoria "${trimmed}" salva e subpasta montada no Google Drive!`);
   };
 
   const handleRemoveCustomCategory = async (catToRemove) => {
@@ -602,7 +645,7 @@ export default function App() {
           updated_at: new Date().toISOString()
         });
     }
-    showToast(`Categoria "${catToRemove}" removida.`);
+    showToast(`Categoria "${catToRemove}" removida da lista.`);
   };
 
   const handleSupabaseAuth = async (e) => {
@@ -613,7 +656,7 @@ export default function App() {
       if (isSignUp) {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
-        showToast('Conta criada! Verifique seu e-mail.');
+        showToast('Conta criada! Verifique seu e-mail ou faça login.');
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
@@ -633,7 +676,7 @@ export default function App() {
       const res = await googleDriveFetch(
         `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime)&pageSize=50`
       );
-      if (!res.ok) throw new Error('Falha ao listar pastas.');
+      if (!res.ok) throw new Error('Falha ao listar pastas do Google Drive.');
       const data = await res.json();
       setDriveFolders(data.files || []);
     } catch (err) {
@@ -650,9 +693,12 @@ export default function App() {
       const res = await googleDriveFetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newFolderName.trim(), mimeType: 'application/vnd.google-apps.folder' })
+        body: JSON.stringify({
+          name: newFolderName.trim(),
+          mimeType: 'application/vnd.google-apps.folder'
+        })
       });
-      if (!res.ok) throw new Error('Falha ao criar pasta.');
+      if (!res.ok) throw new Error('Não foi possível criar a pasta no Google Drive.');
       const created = await res.json();
       await saveRootFolderSetting(created.id, created.name);
       setFolderPickerOpen(false);
@@ -665,19 +711,32 @@ export default function App() {
 
   const saveRootFolderSetting = async (folderId, folderName) => {
     if (!supabase || !session?.user) return;
-    const updated = { ...settings, root_folder_id: folderId, root_folder_name: folderName, organize_by_subfolders: true };
-    await supabase.from('user_settings').upsert({
-      user_id: session.user.id,
+    const updated = {
+      ...settings,
       root_folder_id: folderId,
       root_folder_name: folderName,
-      organize_by_subfolders: true,
-      max_upload_size_mb: updated.max_upload_size_mb,
-      updated_at: new Date().toISOString()
-    });
+      organize_by_subfolders: true
+    };
+    const { error } = await supabase
+      .from('user_settings')
+      .upsert({
+        user_id: session.user.id,
+        root_folder_id: folderId,
+        root_folder_name: folderName,
+        organize_by_subfolders: true,
+        max_upload_size_mb: updated.max_upload_size_mb,
+        updated_at: new Date().toISOString()
+      });
+
+    if (error) {
+      showToast(`Erro ao salvar pasta raiz: ${error.message}`, 'error');
+      return;
+    }
     setSettings(updated);
     setPendingFolderSelection(null);
     setFolderPickerOpen(false);
-    showToast(`Pasta raiz "${folderName}" vinculada!`);
+    showToast(`Pasta raiz "${folderName}" vinculada! Montando subpastas...`);
+
     await handleSyncAllCategorySubfolders(folderId, false);
   };
 
@@ -685,142 +744,31 @@ export default function App() {
     const merged = { ...settings, ...newPartial };
     setSettings(merged);
     if (!supabase || !session?.user) return;
-    await supabase.from('user_settings').upsert({
-      user_id: session.user.id,
-      root_folder_id: merged.root_folder_id,
-      root_folder_name: merged.root_folder_name,
-      organize_by_subfolders: merged.organize_by_subfolders,
-      max_upload_size_mb: merged.max_upload_size_mb,
-      energy_cost_kwh: merged.energy_cost_kwh,
-      default_failure_rate: merged.default_failure_rate,
-      default_post_processing_pct: merged.default_post_processing_pct,
-      labor_hourly_rate: merged.labor_hourly_rate,
-      updated_at: new Date().toISOString()
-    });
-    showToast('Configurações salvas com sucesso!');
+    await supabase
+      .from('user_settings')
+      .upsert({
+        user_id: session.user.id,
+        root_folder_id: merged.root_folder_id,
+        root_folder_name: merged.root_folder_name,
+        organize_by_subfolders: merged.organize_by_subfolders,
+        max_upload_size_mb: merged.max_upload_size_mb,
+        energy_cost_kwh: merged.energy_cost_kwh,
+        default_failure_rate: merged.default_failure_rate,
+        default_post_processing_pct: merged.default_post_processing_pct,
+        labor_hourly_rate: merged.labor_hourly_rate,
+        updated_at: new Date().toISOString()
+      });
+    showToast('Configurações atualizadas!');
+
     if (newPartial.organize_by_subfolders === true && merged.root_folder_id) {
       await handleSyncAllCategorySubfolders(merged.root_folder_id, false);
     }
   };
 
-  // Cadastro de Materiais
-  const handleSaveMaterial = async (e) => {
-    e.preventDefault();
-    if (!supabase || !session?.user) return;
-    try {
-      const { error } = await supabase.from('stl_materials').insert({
-        user_id: session.user.id,
-        type: matForm.type,
-        name: matForm.name.trim(),
-        color: matForm.color.trim(),
-        price_per_unit: Number(matForm.price_per_unit)
-      });
-      if (error) throw error;
-      showToast('Material cadastrado com sucesso!');
-      setNewMaterialModal(false);
-      setMatForm({ type: 'Filamento', name: '', color: 'Preto', price_per_unit: 80 });
-      loadUserData();
-    } catch (err) {
-      showToast(`Erro: ${err.message}`, 'error');
-    }
-  };
-
-  const handleDeleteMaterial = async (id) => {
-    if (!supabase) return;
-    await supabase.from('stl_materials').delete().eq('id', id);
-    showToast('Material excluído.');
-    loadUserData();
-  };
-
-  // Cadastro de Impressoras
-  const handleSavePrinter = async (e) => {
-    e.preventDefault();
-    if (!supabase || !session?.user) return;
-    try {
-      const { error } = await supabase.from('stl_printers').insert({
-        user_id: session.user.id,
-        name: printForm.name.trim(),
-        power_watts: Number(printForm.power_watts),
-        printer_value: Number(printForm.printer_value),
-        lifespan_hours: Number(printForm.lifespan_hours)
-      });
-      if (error) throw error;
-      showToast('Impressora cadastrada com sucesso!');
-      setNewPrinterModal(false);
-      setPrintForm({ name: '', power_watts: 150, printer_value: 2000, lifespan_hours: 5000 });
-      loadUserData();
-    } catch (err) {
-      showToast(`Erro: ${err.message}`, 'error');
-    }
-  };
-
-  const handleDeletePrinter = async (id) => {
-    if (!supabase) return;
-    await supabase.from('stl_printers').delete().eq('id', id);
-    showToast('Impressora excluída.');
-    loadUserData();
-  };
-
-  // Lógica da Calculadora de Custos
-  const calculationResults = useMemo(() => {
-    const selectedPrinter = printers.find((p) => p.id === calcForm.printerId);
-    const selectedMaterial = materials.find((m) => m.id === calcForm.materialId);
-
-    const weightG = Number(calcForm.weightGrams) || 0;
-    const hours = Number(calcForm.printHours) || 0;
-    const failurePct = Number(calcForm.failureRate) || 0;
-    const laborH = Number(calcForm.laborHours) || 0;
-    const profitPct = Number(calcForm.profitMarginPct) || 0;
-
-    // 1. Custo de Material (com Taxa de Falha)
-    const pricePerKgOrL = selectedMaterial ? Number(selectedMaterial.price_per_unit) || 0 : 80;
-    const effectiveWeightG = weightG * (1 + failurePct / 100);
-    const materialCost = (effectiveWeightG / 1000) * pricePerKgOrL;
-
-    // 2. Custo de Energia (Watts * Horas / 1000 * R$/kWh)
-    const powerW = selectedPrinter ? Number(selectedPrinter.power_watts) || 150 : 150;
-    const energyKWh = (powerW * hours) / 1000;
-    const energyCost = energyKWh * Number(settings.energy_cost_kwh || 0.95);
-
-    // 3. Depreciação da Impressora
-    const printerVal = selectedPrinter ? Number(selectedPrinter.printer_value) || 0 : 2000;
-    const lifespanH = selectedPrinter ? Number(selectedPrinter.lifespan_hours) || 5000 : 5000;
-    const depreciationPerHour = lifespanH > 0 ? printerVal / lifespanH : 0;
-    const depreciationCost = depreciationPerHour * hours;
-
-    // 4. Pós-Processamento e Insumos Adicionais
-    const subtotalDirect = materialCost + energyCost + depreciationCost;
-    const postProcBasePct = Number(settings.default_post_processing_pct || 15);
-    let postProcCost = subtotalDirect * (postProcBasePct / 100);
-    if (calcForm.washed) postProcCost += 3.00; // Custo estimado de IPA/luvas
-    if (calcForm.painted) postProcCost += 12.00; // Custo estimado de primer/tintas
-
-    // 5. Mão de Obra
-    const laborRate = Number(settings.labor_hourly_rate || 25.00);
-    const laborCost = laborH * laborRate;
-
-    // 6. Totais e Preço Final com Lucro
-    const totalCost = subtotalDirect + postProcCost + laborCost;
-    const suggestedPrice = totalCost * (1 + profitPct / 100);
-    const netProfit = suggestedPrice - totalCost;
-
-    return {
-      materialCost,
-      energyCost,
-      depreciationCost,
-      postProcCost,
-      laborCost,
-      totalCost,
-      suggestedPrice,
-      netProfit,
-      effectiveWeightG
-    };
-  }, [calcForm, printers, materials, settings]);
-
   const handleUploadNewModel = async (e) => {
     e.preventDefault();
     if (!settings.root_folder_id) {
-      showToast('Configure a pasta raiz no Google Drive primeiro.', 'error');
+      showToast('Configure a pasta raiz Biblioteca STL antes de enviar arquivos.', 'error');
       setFolderPickerOpen(true);
       return;
     }
@@ -829,38 +777,66 @@ export default function App() {
       return;
     }
 
+    const maxBytes = (settings.max_upload_size_mb || 150) * 1024 * 1024;
+    if (uploadForm.zipFile.size > maxBytes) {
+      showToast(`O arquivo excede o limite configurado de ${settings.max_upload_size_mb} MB.`, 'error');
+      return;
+    }
+
     setUploading(true);
     let uploadedDriveData = null;
     let targetFolderId = settings.root_folder_id;
 
     try {
-      setUploadStep(`Enviando ZIP para a subpasta "${uploadForm.category}" no Drive...`);
+      setUploadStep(
+        settings.organize_by_subfolders
+          ? `Garantindo subpasta "${uploadForm.category}" no Google Drive...`
+          : 'Verificando pasta raiz no Google Drive...'
+      );
       targetFolderId = await getTargetUploadFolderId(uploadForm.category);
 
-      const metadata = { name: uploadForm.zipFile.name, parents: [targetFolderId], mimeType: 'application/zip' };
+      setUploadStep(`Enviando arquivo ZIP para o Google Drive...`);
+      const metadata = {
+        name: uploadForm.zipFile.name,
+        parents: [targetFolderId],
+        mimeType: 'application/zip'
+      };
+
       const formData = new FormData();
       formData.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
       formData.append('file', uploadForm.zipFile);
 
       const driveRes = await googleDriveFetch(
         'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,size,webViewLink',
-        { method: 'POST', body: formData }
+        {
+          method: 'POST',
+          body: formData
+        }
       );
 
-      if (!driveRes.ok) throw new Error('Falha no upload para o Google Drive.');
-      uploadedDriveData = await driveRes.json();
+      if (!driveRes.ok) {
+        const errBody = await driveRes.json().catch(() => ({}));
+        throw new Error(errBody?.error?.message || `Erro ${driveRes.status} ao enviar arquivo para o Google Drive.`);
+      }
 
+      uploadedDriveData = await driveRes.json();
       await completeDatabaseRegistration(uploadedDriveData, targetFolderId, uploadForm);
 
-      setUploadForm({ name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFile: null });
+      setUploadForm({
+        name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFile: null
+      });
       setPendingRecovery(null);
-      showToast('Modelo enviado e catalogado com sucesso!');
+      showToast(`Modelo enviado para o Drive e catalogado com sucesso!`);
       setActiveTab('catalogo');
       loadUserData();
     } catch (err) {
       if (uploadedDriveData?.id) {
-        setPendingRecovery({ driveData: uploadedDriveData, folderId: targetFolderId, formSnapshot: { ...uploadForm } });
-        showToast('O ZIP foi enviado, mas falhou ao salvar metadados. Use o botão de recuperação!', 'error');
+        setPendingRecovery({
+          driveData: uploadedDriveData,
+          folderId: targetFolderId,
+          formSnapshot: { ...uploadForm }
+        });
+        showToast('O ZIP foi enviado ao Drive, mas houve falha ao salvar no banco. Use o botão de recuperação abaixo!', 'error');
       } else {
         showToast(err.message, 'error');
       }
@@ -872,16 +848,24 @@ export default function App() {
 
   const completeDatabaseRegistration = async (driveData, folderId, formValues) => {
     let imagePath = null;
+
     if (formValues.imageFile) {
-      setUploadStep('Enviando imagem para o Supabase...');
+      setUploadStep('Enviando imagem de referência ao bucket privado do Supabase...');
       const ext = formValues.imageFile.name.split('.').pop();
-      const fileName = `${session.user.id}/${Date.now()}.${ext}`;
-      const { error: storageErr } = await supabase.storage.from('stl-images').upload(fileName, formValues.imageFile);
-      if (storageErr) throw storageErr;
+      const fileName = `${session.user.id}/${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
+      const { error: storageErr } = await supabase.storage
+        .from('stl-images')
+        .upload(fileName, formValues.imageFile, { upsert: false });
+
+      if (storageErr) throw new Error(`Falha ao salvar imagem no Supabase: ${storageErr.message}`);
       imagePath = fileName;
     }
 
-    const tagsArray = formValues.tags ? formValues.tags.split(',').map((t) => t.trim()).filter(Boolean) : [];
+    setUploadStep('Salvando metadados no catálogo...');
+    const tagsArray = formValues.tags
+      ? formValues.tags.split(',').map((t) => t.trim()).filter(Boolean)
+      : [];
+
     const { error: dbErr } = await supabase.from('stl_models').insert({
       user_id: session.user.id,
       name: formValues.name.trim() || driveData.name.replace(/\.zip$/i, ''),
@@ -892,20 +876,28 @@ export default function App() {
       image_path: imagePath,
       drive_file_id: driveData.id,
       drive_file_name: driveData.name,
-      drive_file_url: driveData.webViewLink,
-      drive_file_size: Number(driveData.size || 0),
+      drive_file_url: driveData.webViewLink || `https://drive.google.com/file/d/${driveData.id}/view`,
+      drive_file_size: Number(driveData.size || formValues.zipFile?.size || 0),
       drive_folder_id: folderId
     });
-    if (dbErr) throw dbErr;
+
+    if (dbErr) throw new Error(`Falha ao salvar metadados: ${dbErr.message}`);
   };
 
   const handleRetryMetadataSave = async () => {
     if (!pendingRecovery) return;
     setUploading(true);
     try {
-      await completeDatabaseRegistration(pendingRecovery.driveData, pendingRecovery.folderId, pendingRecovery.formSnapshot);
+      await completeDatabaseRegistration(
+        pendingRecovery.driveData,
+        pendingRecovery.folderId,
+        pendingRecovery.formSnapshot
+      );
       setPendingRecovery(null);
-      showToast('Cadastro recuperado com sucesso!');
+      setUploadForm({
+        name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFile: null
+      });
+      showToast('Cadastro recuperado e concluído com sucesso!');
       setActiveTab('catalogo');
       loadUserData();
     } catch (err) {
@@ -921,22 +913,36 @@ export default function App() {
     setLoadingDriveZips(true);
     try {
       const subFolders = await fetchRootSubfolders(settings.root_folder_id);
+
       const folderMap = { [settings.root_folder_id]: 'Pasta Raiz' };
-      subFolders.forEach((sf) => { folderMap[sf.id] = sf.name; });
+      subFolders.forEach((sf) => {
+        folderMap[sf.id] = sf.name;
+      });
 
       const allParentIds = [settings.root_folder_id, ...subFolders.map((f) => f.id)];
       const parentsCondition = allParentIds.map((id) => `'${id}' in parents`).join(' or ');
 
-      const zipsQ = encodeURIComponent(`(${parentsCondition}) and (mimeType = 'application/zip' or name contains '.zip') and trashed = false`);
-      const res = await googleDriveFetch(`https://www.googleapis.com/drive/v3/files?q=${zipsQ}&fields=files(id,name,size,webViewLink,parents)&pageSize=100`);
-      if (!res.ok) throw new Error('Erro ao listar ZIPs.');
+      const zipsQ = encodeURIComponent(
+        `(${parentsCondition}) and (mimeType = 'application/zip' or mimeType = 'application/x-zip-compressed' or name contains '.zip') and trashed = false`
+      );
+      const res = await googleDriveFetch(
+        `https://www.googleapis.com/drive/v3/files?q=${zipsQ}&fields=files(id,name,size,createdTime,webViewLink,parents)&pageSize=100`
+      );
+      if (!res.ok) throw new Error('Erro ao listar arquivos ZIP do Google Drive.');
       const data = await res.json();
 
-      setDriveZipFiles((data.files || []).map((file) => {
+      const enrichedFiles = (data.files || []).map((file) => {
         const parentId = file.parents?.[0] || settings.root_folder_id;
         const folderLabel = folderMap[parentId] || 'Pasta Raiz';
-        return { ...file, detectedFolderId: parentId, detectedCategory: folderLabel !== 'Pasta Raiz' ? folderLabel : 'Geral', folderLabel };
-      }));
+        return {
+          ...file,
+          detectedFolderId: parentId,
+          detectedCategory: folderLabel !== 'Pasta Raiz' ? folderLabel : 'Geral',
+          folderLabel
+        };
+      });
+
+      setDriveZipFiles(enrichedFiles);
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -953,16 +959,52 @@ export default function App() {
   const handleConfirmImport = async (e) => {
     e.preventDefault();
     if (!importingFile) return;
+
+    if (models.some((m) => m.drive_file_id === importingFile.id)) {
+      showToast('Este arquivo ZIP já está cadastrado.', 'error');
+      return;
+    }
+
     setUploading(true);
     try {
-      await completeDatabaseRegistration(importingFile, importingFile.detectedFolderId || settings.root_folder_id, importForm);
-      showToast('Arquivo importado com sucesso!');
+      const targetFolderId = importingFile.detectedFolderId || settings.root_folder_id;
+      await completeDatabaseRegistration(importingFile, targetFolderId, importForm);
+      showToast(`Arquivo "${importingFile.name}" importado!`);
       setImportingFile(null);
       loadUserData();
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
       setUploading(false);
+      setUploadStep('');
+    }
+  };
+
+  const verifyDriveFileAvailability = async (model) => {
+    if (!googleConnected) return;
+    setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'checking' }));
+    try {
+      const res = await googleDriveFetch(
+        `https://www.googleapis.com/drive/v3/files/${model.drive_file_id}?fields=id,name,trashed`
+      );
+      if (!res.ok) {
+        setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'missing' }));
+        return;
+      }
+      const data = await res.json();
+      setDriveStatusCheck((prev) => ({
+        ...prev,
+        [model.id]: data.trashed ? 'missing' : 'available'
+      }));
+    } catch {
+      setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'missing' }));
+    }
+  };
+
+  const handleOpenDetails = (model) => {
+    setSelectedModel(model);
+    if (googleConnected) {
+      verifyDriveFileAvailability(model);
     }
   };
 
@@ -974,10 +1016,17 @@ export default function App() {
       let imagePath = editingModel.image_path;
       if (editingModel.newImageFile) {
         const ext = editingModel.newImageFile.name.split('.').pop();
-        const fileName = `${session.user.id}/${Date.now()}.${ext}`;
-        const { error: upErr } = await supabase.storage.from('stl-images').upload(fileName, editingModel.newImageFile);
+        const fileName = `${session.user.id}/${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
+        
+        const { error: upErr } = await supabase.storage
+          .from('stl-images')
+          .upload(fileName, editingModel.newImageFile);
         if (upErr) throw upErr;
-        if (editingModel.image_path) await supabase.storage.from('stl-images').remove([editingModel.image_path]);
+
+        if (editingModel.image_path) {
+          await supabase.storage.from('stl-images').remove([editingModel.image_path]);
+        }
+
         imagePath = fileName;
       }
 
@@ -985,22 +1034,26 @@ export default function App() {
         ? editingModel.tagsInput.split(',').map((t) => t.trim()).filter(Boolean)
         : (editingModel.tags || []);
 
-      await supabase.from('stl_models').update({
-        name: editingModel.name.trim(),
-        description: editingModel.description.trim(),
-        category: editingModel.category,
-        tags: tagsArray,
-        notes: editingModel.notes.trim(),
-        image_path: imagePath,
-        updated_at: new Date().toISOString()
-      }).eq('id', editingModel.id);
+      const { error } = await supabase
+        .from('stl_models')
+        .update({
+          name: editingModel.name.trim(),
+          description: editingModel.description.trim(),
+          category: editingModel.category,
+          tags: tagsArray,
+          notes: editingModel.notes.trim(),
+          image_path: imagePath,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', editingModel.id);
 
-      showToast('Atualizado com sucesso!');
+      if (error) throw error;
+      showToast('Cadastro e imagem atualizados com sucesso!');
       setEditingModel(null);
       setSelectedModel(null);
       loadUserData();
     } catch (err) {
-      showToast(err.message, 'error');
+      showToast(`Erro ao atualizar: ${err.message}`, 'error');
     } finally {
       setUploading(false);
     }
@@ -1011,18 +1064,49 @@ export default function App() {
     setUploading(true);
     try {
       if (deleteAlsoFromDrive) {
-        let driveDel = await googleDriveFetch(`https://www.googleapis.com/drive/v3/files/${deleteConfirmModel.drive_file_id}`, { method: 'DELETE' });
+        let driveDel = await googleDriveFetch(
+          `https://www.googleapis.com/drive/v3/files/${deleteConfirmModel.drive_file_id}`,
+          { method: 'DELETE' }
+        );
+
         if (!driveDel.ok && driveDel.status !== 404) {
-          await googleDriveFetch(`https://www.googleapis.com/drive/v3/files/${deleteConfirmModel.drive_file_id}`, {
-            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true })
-          });
+          const trashRes = await googleDriveFetch(
+            `https://www.googleapis.com/drive/v3/files/${deleteConfirmModel.drive_file_id}`,
+            {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ trashed: true })
+            }
+          );
+
+          if (!trashRes.ok) {
+            const errData = await trashRes.json().catch(() => ({}));
+            throw new Error(
+              errData?.error?.message ||
+                'O escopo drive.file permite excluir pelo app apenas arquivos enviados pelo próprio app.'
+            );
+          }
         }
       }
-      if (deleteConfirmModel.image_path) await supabase.storage.from('stl-images').remove([deleteConfirmModel.image_path]);
-      await supabase.from('stl_models').delete().eq('id', deleteConfirmModel.id);
 
-      showToast('Modelo excluído!');
+      if (deleteConfirmModel.image_path) {
+        await supabase.storage.from('stl-images').remove([deleteConfirmModel.image_path]);
+      }
+
+      const { error } = await supabase
+        .from('stl_models')
+        .delete()
+        .eq('id', deleteConfirmModel.id);
+
+      if (error) throw error;
+
+      showToast(
+        deleteAlsoFromDrive
+          ? 'Excluído do catálogo e do Google Drive com sucesso!'
+          : 'Removido do catálogo (arquivo ZIP preservado no Drive).'
+      );
       setDeleteConfirmModel(null);
+      setDeleteAlsoFromDrive(false);
       setSelectedModel(null);
       loadUserData();
     } catch (err) {
@@ -1031,6 +1115,112 @@ export default function App() {
       setUploading(false);
     }
   };
+
+  // Funções da Calculadora
+  const handleSaveMaterial = async (e) => {
+    e.preventDefault();
+    if (!supabase || !session?.user) return;
+    try {
+      const { error } = await supabase.from('stl_materials').insert({
+        user_id: session.user.id,
+        type: matForm.type,
+        name: matForm.name.trim(),
+        color: matForm.color.trim(),
+        price_per_unit: Number(matForm.price_per_unit)
+      });
+      if (error) throw error;
+      showToast('Material cadastrado!');
+      setNewMaterialModal(false);
+      setMatForm({ type: 'Filamento', name: '', color: 'Preto', price_per_unit: 80 });
+      loadUserData();
+    } catch (err) {
+      showToast(`Erro: ${err.message}`, 'error');
+    }
+  };
+
+  const handleDeleteMaterial = async (id) => {
+    if (!supabase) return;
+    await supabase.from('stl_materials').delete().eq('id', id);
+    showToast('Material excluído.');
+    loadUserData();
+  };
+
+  const handleSavePrinter = async (e) => {
+    e.preventDefault();
+    if (!supabase || !session?.user) return;
+    try {
+      const { error } = await supabase.from('stl_printers').insert({
+        user_id: session.user.id,
+        name: printForm.name.trim(),
+        power_watts: Number(printForm.power_watts),
+        printer_value: Number(printForm.printer_value),
+        lifespan_hours: Number(printForm.lifespan_hours)
+      });
+      if (error) throw error;
+      showToast('Impressora cadastrada!');
+      setNewPrinterModal(false);
+      setPrintForm({ name: '', power_watts: 150, printer_value: 2000, lifespan_hours: 5000 });
+      loadUserData();
+    } catch (err) {
+      showToast(`Erro: ${err.message}`, 'error');
+    }
+  };
+
+  const handleDeletePrinter = async (id) => {
+    if (!supabase) return;
+    await supabase.from('stl_printers').delete().eq('id', id);
+    showToast('Impressora excluída.');
+    loadUserData();
+  };
+
+  const calculationResults = useMemo(() => {
+    const selectedPrinter = printers.find((p) => p.id === calcForm.printerId);
+    const selectedMaterial = materials.find((m) => m.id === calcForm.materialId);
+
+    const weightG = Number(calcForm.weightGrams) || 0;
+    const hours = Number(calcForm.printHours) || 0;
+    const failurePct = Number(calcForm.failureRate) || 0;
+    const laborH = Number(calcForm.laborHours) || 0;
+    const profitPct = Number(calcForm.profitMarginPct) || 0;
+
+    const pricePerKgOrL = selectedMaterial ? Number(selectedMaterial.price_per_unit) || 0 : 80;
+    const effectiveWeightG = weightG * (1 + failurePct / 100);
+    const materialCost = (effectiveWeightG / 1000) * pricePerKgOrL;
+
+    const powerW = selectedPrinter ? Number(selectedPrinter.power_watts) || 150 : 150;
+    const energyKWh = (powerW * hours) / 1000;
+    const energyCost = energyKWh * Number(settings.energy_cost_kwh || 0.95);
+
+    const printerVal = selectedPrinter ? Number(selectedPrinter.printer_value) || 0 : 2000;
+    const lifespanH = selectedPrinter ? Number(selectedPrinter.lifespan_hours) || 5000 : 5000;
+    const depreciationPerHour = lifespanH > 0 ? printerVal / lifespanH : 0;
+    const depreciationCost = depreciationPerHour * hours;
+
+    const subtotalDirect = materialCost + energyCost + depreciationCost;
+    const postProcBasePct = Number(settings.default_post_processing_pct || 15);
+    let postProcCost = subtotalDirect * (postProcBasePct / 100);
+    if (calcForm.washed) postProcCost += 3.00;
+    if (calcForm.painted) postProcCost += 12.00;
+
+    const laborRate = Number(settings.labor_hourly_rate || 25.00);
+    const laborCost = laborH * laborRate;
+
+    const totalCost = subtotalDirect + postProcCost + laborCost;
+    const suggestedPrice = totalCost * (1 + profitPct / 100);
+    const netProfit = suggestedPrice - totalCost;
+
+    return {
+      materialCost,
+      energyCost,
+      depreciationCost,
+      postProcCost,
+      laborCost,
+      totalCost,
+      suggestedPrice,
+      netProfit,
+      effectiveWeightG
+    };
+  }, [calcForm, printers, materials, settings]);
 
   const renderLogo = (sizeClass = 'w-10 h-10') => (
     <div className={`${sizeClass} rounded-xl overflow-hidden bg-[#e4e0d7] flex items-center justify-center border border-[#262522] shrink-0`}>
@@ -1053,12 +1243,13 @@ export default function App() {
         <button
           type="button"
           onClick={() => { setAddingCategoryContext(addingCategoryContext === contextKey ? null : contextKey); setNewCategoryName(''); }}
-          className="text-[11px] font-semibold text-[#e4e0d7] hover:text-white flex items-center gap-1 cursor-pointer"
+          className="text-[11px] font-semibold text-[#e4e0d7] hover:text-white flex items-center gap-1 cursor-pointer transition"
         >
           <Plus className="w-3.5 h-3.5" />
           <span>{addingCategoryContext === contextKey ? 'Cancelar' : 'Nova Categoria'}</span>
         </button>
       </div>
+
       {addingCategoryContext === contextKey ? (
         <div className="flex gap-2">
           <input
@@ -1067,13 +1258,13 @@ export default function App() {
             onChange={(e) => setNewCategoryName(e.target.value)}
             placeholder="Nome da categoria..."
             autoFocus
-            className="flex-1 px-3 py-2 bg-[#000000] border border-[#e4e0d7] rounded-xl text-sm text-[#e4e0d7]"
+            className="flex-1 px-3 py-2 bg-[#000000] border border-[#e4e0d7] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none"
           />
           <button
             type="button"
             disabled={savingCategory}
             onClick={() => handleAddPermanentCategory(contextKey)}
-            className="px-3.5 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
+            className="px-3.5 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold cursor-pointer shrink-0 transition"
           >
             Salvar
           </button>
@@ -1082,7 +1273,7 @@ export default function App() {
         <select
           value={currentValue}
           onChange={(e) => onSelectChange(e.target.value)}
-          className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] focus:outline-none"
+          className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7]"
         >
           {allCategories.map((c) => <option key={c} value={c} className="bg-[#0a0a0a] text-[#e4e0d7]">{c}</option>)}
         </select>
@@ -1197,16 +1388,13 @@ export default function App() {
 
           {/* Botão Hambúrguer Mobile */}
           <div className="md:hidden flex items-center">
-            <button
-              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="p-2 rounded-xl bg-[#0a0a0a] border border-[#262522] text-[#e4e0d7] cursor-pointer"
-            >
+            <button onClick={() => setMobileMenuOpen(!mobileMenuOpen)} className="p-2 rounded-xl bg-[#0a0a0a] border border-[#262522] text-[#e4e0d7] cursor-pointer">
               {mobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
             </button>
           </div>
         </div>
 
-        {/* Menu Suspenso Mobile (3 Barrinhas) */}
+        {/* Menu Suspenso Mobile */}
         {mobileMenuOpen && (
           <div className="md:hidden bg-[#0a0a0a] border-b border-[#262522] px-4 py-3 space-y-2">
             <button onClick={() => { setActiveTab('catalogo'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
@@ -1234,7 +1422,7 @@ export default function App() {
           <div className="max-w-7xl mx-auto px-3 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2.5 text-xs sm:text-sm text-[#e4e0d7]">
               <HardDrive className="w-5 h-5 text-[#c89d66] shrink-0" />
-              {!googleConnected ? <span>Conecte sua conta Google para gerenciar seus arquivos e pastas no Drive.</span> : <span>Selecione ou crie a pasta raiz <strong>Biblioteca STL</strong> no seu Google Drive.</span>}
+              {!googleConnected ? <span>Conecte sua conta Google para gerenciar seus arquivos e pastas no Google Drive.</span> : <span>Selecione ou crie a pasta raiz <strong>Biblioteca STL</strong> no seu Google Drive.</span>}
             </div>
             <div className="self-end sm:self-auto">
               {!googleConnected ? (
@@ -1254,7 +1442,7 @@ export default function App() {
             <div className="flex flex-col md:flex-row gap-3 sm:gap-4 items-stretch md:items-center justify-between">
               <div className="relative flex-1">
                 <Search className="w-4 h-4 text-[#8c877e] absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Buscar modelo por nome, descrição ou tag..." className="w-full pl-10 pr-4 py-2.5 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none" />
+                <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Buscar modelo por nome, descrição ou tag..." className="w-full pl-10 pr-4 py-2.5 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none focus:border-[#e4e0d7]" />
               </div>
               <div className="flex items-center gap-2 overflow-x-auto pb-2 md:pb-0">
                 {['Todas', ...allCategories].map((cat) => (
@@ -1316,7 +1504,7 @@ export default function App() {
           <div className="max-w-2xl mx-auto bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-6">
             <div>
               <h2 className="text-lg font-bold text-[#e4e0d7]">Enviar Novo Modelo STL (.ZIP)</h2>
-              <p className="text-xs text-[#8c877e] mt-1">O arquivo ZIP será salvo na subpasta correspondente no Google Drive.</p>
+              <p className="text-xs text-[#8c877e] mt-1">O arquivo ZIP será salvo dentro da subpasta correspondente no Google Drive.</p>
             </div>
             {pendingRecovery && (
               <div className="p-4 rounded-xl bg-[#c89d66]/10 border border-[#c89d66]/40 space-y-3">
@@ -1405,7 +1593,26 @@ export default function App() {
                           <td className="py-3.5 px-4 text-xs text-[#a39e93]"><span className="px-2 py-0.5 rounded bg-[#141413] border border-[#262522]">{df.folderLabel}</span></td>
                           <td className="py-3.5 px-4 text-xs text-[#8c877e]">{formatBytes(df.size)}</td>
                           <td className="py-3.5 px-4 text-right">
-                            {alreadyRegistered ? <span className="text-xs text-[#70a37f]">Cadastrado</span> : <button onClick={() => { setImportingFile(df); setImportForm({ name: df.name.replace(/\.zip$/i, ''), description: '', category: df.detectedCategory || 'Geral', tags: '', notes: '', imageFile: null }); }} className="px-3.5 py-1.5 bg-[#e4e0d7] text-[#000000] rounded-lg text-xs font-bold cursor-pointer">Importar</button>}
+                            {alreadyRegistered ? (
+                              <span className="text-xs text-[#70a37f]">Cadastrado</span>
+                            ) : (
+                              <button
+                                onClick={() => {
+                                  setImportingFile(df);
+                                  setImportForm({
+                                    name: df.name.replace(/\.zip$/i, ''),
+                                    description: '',
+                                    category: df.detectedCategory || 'Geral',
+                                    tags: '',
+                                    notes: '',
+                                    imageFile: null
+                                  });
+                                }}
+                                className="px-3.5 py-1.5 bg-[#e4e0d7] text-[#000000] rounded-lg text-xs font-bold cursor-pointer"
+                              >
+                                Importar
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );
@@ -1417,7 +1624,7 @@ export default function App() {
           </div>
         )}
 
-        {/* NOVA ABA: CALCULADORA DE GASTOS E PRECIFICAÇÃO */}
+        {/* CALCULADORA DE GASTOS */}
         {activeTab === 'calculadora' && (
           <div className="space-y-6 max-w-4xl mx-auto">
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-5 sm:p-6 space-y-4">
@@ -1439,7 +1646,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Formulário de Cálculo */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pt-4 border-t border-[#1c1b19]">
                 <div>
                   <label className="block text-xs font-medium text-[#a39e93] mb-1">Impressora</label>
@@ -1478,7 +1684,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Checkboxes de Pós-Processamento */}
               <div className="flex flex-wrap gap-6 pt-3 border-t border-[#1c1b19]">
                 <label className="flex items-center gap-2 text-xs text-[#e4e0d7] cursor-pointer">
                   <input type="checkbox" checked={calcForm.washed} onChange={(e) => setCalcForm({ ...calcForm, washed: e.target.checked })} className="w-4 h-4 accent-[#e4e0d7]" />
@@ -1490,7 +1695,6 @@ export default function App() {
                 </label>
               </div>
 
-              {/* Margem de Lucro Desejada */}
               <div className="pt-3 border-t border-[#1c1b19] flex items-center justify-between gap-4">
                 <div>
                   <p className="text-xs font-semibold text-[#e4e0d7]">Margem de Lucro Desejada (Markup %)</p>
@@ -1500,7 +1704,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Resultado da Precificação */}
             <div className="bg-[#0a0a0a] border border-[#e4e0d7]/30 rounded-2xl p-6 space-y-5 shadow-2xl">
               <h3 className="font-bold text-[#e4e0d7] text-base border-b border-[#1c1b19] pb-3">Detalhamento de Custos e Sugestão de Venda</h3>
 
@@ -1549,7 +1752,7 @@ export default function App() {
                   <HardDrive className="w-6 h-6 text-[#e4e0d7] shrink-0" />
                   <div>
                     <h3 className="font-bold text-[#e4e0d7] text-base">Google Drive (Armazenamento Principal)</h3>
-                    <p className="text-xs text-[#8c877e]">Sessão persistente ativa</p>
+                    <p className="text-xs text-[#8c877e]">Renovação automática de sessão ativa</p>
                   </div>
                 </div>
                 <span className={`px-3 py-1 rounded-full text-xs font-semibold ${googleConnected ? 'bg-[#4d7c5b]/15 text-[#70a37f] border border-[#4d7c5b]/30' : 'bg-[#c89d66]/15 text-[#c89d66]'}`}>
@@ -1558,22 +1761,38 @@ export default function App() {
               </div>
 
               <div className="p-4 rounded-xl bg-[#000000] border border-[#262522] space-y-2 text-xs">
-                <div className="flex justify-between"><span className="text-[#8c877e]">Pasta Raiz:</span><span className="font-semibold text-[#e4e0d7]">{settings.root_folder_name || 'Nenhuma'}</span></div>
-                <div className="flex justify-between"><span className="text-[#8c877e]">ID da Pasta:</span><span className="font-mono text-[#c89d66]">{settings.root_folder_id || '—'}</span></div>
+                <div className="flex flex-col sm:flex-row sm:justify-between gap-1">
+                  <span className="text-[#8c877e]">Pasta Raiz:</span>
+                  <span className="font-semibold text-[#e4e0d7] break-all">{settings.root_folder_name || 'Nenhuma'}</span>
+                </div>
+                <div className="flex flex-col sm:flex-row sm:justify-between gap-1">
+                  <span className="text-[#8c877e]">ID da Pasta Raiz:</span>
+                  <span className="font-mono text-[#c89d66] break-all">{settings.root_folder_id || '—'}</span>
+                </div>
               </div>
 
               <div className="flex flex-wrap gap-2.5">
-                <button onClick={handleConnectGoogle} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">Conectar Conta Google</button>
+                <button onClick={handleConnectGoogle} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">
+                  {googleConnected ? 'Renovar Autorização Google' : 'Conectar Conta Google'}
+                </button>
                 {googleConnected && (
                   <>
-                    <button onClick={() => openFolderPicker()} className="px-4 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold cursor-pointer">Selecionar Outra Pasta Raiz</button>
-                    <button onClick={handleDisconnectGoogle} className="px-4 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs font-semibold cursor-pointer">Desconectar Google</button>
+                    <button onClick={() => openFolderPicker()} className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold cursor-pointer">
+                      Selecionar Outra Pasta Raiz
+                    </button>
+                    {settings.root_folder_id && (
+                      <a href={`https://drive.google.com/drive/folders/${settings.root_folder_id}`} target="_blank" rel="noreferrer" className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold inline-flex items-center gap-1.5">
+                        <span>Abrir Pasta Raiz no Drive</span><ExternalLink className="w-3.5 h-3.5" />
+                      </a>
+                    )}
+                    <button onClick={handleDisconnectGoogle} className="px-4 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs font-semibold cursor-pointer">
+                      Desconectar Google
+                    </button>
                   </>
                 )}
               </div>
             </div>
 
-            {/* Parâmetros Padrão da Calculadora nas Configurações */}
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-4">
               <h3 className="font-bold text-[#e4e0d7] text-base">Parâmetros Padrão da Calculadora</h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1596,7 +1815,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Gerenciamento de Materiais e Impressoras nas Configurações */}
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-4">
               <div className="flex justify-between items-center">
                 <h3 className="font-bold text-[#e4e0d7] text-base">Materiais Cadastrados ({materials.length})</h3>
@@ -1630,7 +1848,7 @@ export default function App() {
         )}
       </main>
 
-      {/* Modal Novo Material */}
+      {/* MODAL NOVO MATERIAL */}
       {newMaterialModal && (
         <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
           <form onSubmit={handleSaveMaterial} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-md w-full p-6 space-y-4">
@@ -1662,7 +1880,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Modal Nova Impressora */}
+      {/* MODAL NOVA IMPRESSORA */}
       {newPrinterModal && (
         <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
           <form onSubmit={handleSavePrinter} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-md w-full p-6 space-y-4">
@@ -1676,11 +1894,11 @@ export default function App() {
               <input type="number" required value={printForm.power_watts} onChange={(e) => setPrintForm({ ...printForm, power_watts: e.target.value })} placeholder="Ex: 350" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
             </div>
             <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Valor de Compra da Impressora (R$)</label>
+              <label className="block text-xs text-[#a39e93] mb-1">Valor de Compra (R$)</label>
               <input type="number" required value={printForm.printer_value} onChange={(e) => setPrintForm({ ...printForm, printer_value: e.target.value })} placeholder="Ex: 5000" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
             </div>
             <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Vida Útil Estimada (Horas de Uso)</label>
+              <label className="block text-xs text-[#a39e93] mb-1">Vida Útil (Horas)</label>
               <input type="number" required value={printForm.lifespan_hours} onChange={(e) => setPrintForm({ ...printForm, lifespan_hours: e.target.value })} placeholder="Ex: 5000" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
             </div>
             <div className="flex justify-end gap-2 pt-2">
@@ -1691,7 +1909,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Modais Padrão (Detalhes, Edição, Importação e Pastas) */}
+      {/* MODAL DETALHES */}
       {selectedModel && (
         <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
           <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
@@ -1714,6 +1932,12 @@ export default function App() {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {lightboxUrl && (
+        <div onClick={() => setLightboxUrl(null)} className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-3 cursor-zoom-out">
+          <img src={lightboxUrl} alt="Ampliada" className="max-w-full max-h-full rounded-xl border border-[#262522]" />
         </div>
       )}
 
