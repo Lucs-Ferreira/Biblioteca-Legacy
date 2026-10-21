@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import {
   Box, Upload, FolderDown, Settings, Search, Plus, ExternalLink,
@@ -56,18 +56,17 @@ export default function App() {
   const [isSignUp, setIsSignUp] = useState(false);
   const [authError, setAuthError] = useState('');
 
-  const [googleToken, setGoogleToken] = useState('');
-  const [googleUserEmail, setGoogleUserEmail] = useState('');
+  const [googleToken, setGoogleToken] = useState(() => localStorage.getItem('stl_google_access_token') || '');
+  const [googleUserEmail, setGoogleUserEmail] = useState(() => localStorage.getItem('stl_google_email') || '');
   const [googleConnected, setGoogleConnected] = useState(false);
+  const tokenClientRef = useRef(null);
 
-  // Organização por subpastas de categoria ativa por padrão (true)
   const [settings, setSettings] = useState({
     root_folder_id: '',
     root_folder_name: '',
     organize_by_subfolders: true,
     max_upload_size_mb: 150,
-    custom_categories: [],
-    google_refresh_token: ''
+    custom_categories: []
   });
 
   const [addingCategoryContext, setAddingCategoryContext] = useState(null);
@@ -124,7 +123,7 @@ export default function App() {
 
   const showToast = (message, type = 'success') => {
     setToast({ message, type });
-    setTimeout(() => setToast(null), 5000);
+    setTimeout(() => setToast(null), 6000);
   };
 
   const allCategories = useMemo(() => {
@@ -133,6 +132,80 @@ export default function App() {
     return Array.from(new Set([...BASE_CATEGORIES, ...custom, ...fromModels]));
   }, [settings.custom_categories, models]);
 
+  // ============================================================================
+  // GERENCIADOR INTELIGENTE DE TOKEN GOOGLE (Evita erro 401 ao salvar/excluir)
+  // ============================================================================
+  const saveTokenData = (token, expiresInSec = 3500) => {
+    const expiryTime = Date.now() + expiresInSec * 1000;
+    setGoogleToken(token);
+    setGoogleConnected(true);
+    localStorage.setItem('stl_google_access_token', token);
+    localStorage.setItem('stl_google_token_expiry', String(expiryTime));
+  };
+
+  // Verifica se o token ainda é válido; se tiver expirado, solicita renovação silenciosa na hora
+  const ensureValidGoogleToken = async () => {
+    const storedToken = googleToken || localStorage.getItem('stl_google_access_token');
+    const expiry = Number(localStorage.getItem('stl_google_token_expiry') || 0);
+
+    // Se o token existe e ainda faltam mais de 2 minutos para expirar, valida rápido
+    if (storedToken && Date.now() < expiry - 120000) {
+      return storedToken;
+    }
+
+    // Se expirou ou está prestes a expirar, renova via Google Identity Services sem perder a ação atual
+    if (!window.google?.accounts?.oauth2 || !GOOGLE_CLIENT_ID) {
+      throw new Error('Serviço de autenticação do Google não disponível. Recarregue a página.');
+    }
+
+    return new Promise((resolve, reject) => {
+      const client = window.google.accounts.oauth2.initTokenClient({
+        client_id: GOOGLE_CLIENT_ID,
+        scope: GOOGLE_SCOPES,
+        prompt: '', // Renovação silenciosa sem forçar tela de consentimento se já autorizado
+        hint: googleUserEmail || localStorage.getItem('stl_google_email') || undefined,
+        callback: (response) => {
+          if (response.error) {
+            setGoogleConnected(false);
+            reject(new Error('Sua sessão do Google expirou. Clique em "Conectar Conta Google" novamente.'));
+            return;
+          }
+          saveTokenData(response.access_token, response.expires_in || 3500);
+          resolve(response.access_token);
+        }
+      });
+      client.requestAccessToken({ prompt: '' });
+    });
+  };
+
+  // Wrapper de requisições para a API do Google Drive v3 com auto-retry em caso de 401
+  const googleDriveFetch = async (url, options = {}) => {
+    let token = await ensureValidGoogleToken();
+    let res = await fetch(url, {
+      ...options,
+      headers: {
+        ...(options.headers || {}),
+        Authorization: `Bearer ${token}`
+      }
+    });
+
+    // Se mesmo assim o Google retornar 401 (token invalidado), força a renovação imediata e tenta de novo
+    if (res.status === 401) {
+      localStorage.setItem('stl_google_token_expiry', '0');
+      token = await ensureValidGoogleToken();
+      res = await fetch(url, {
+        ...options,
+        headers: {
+          ...(options.headers || {}),
+          Authorization: `Bearer ${token}`
+        }
+      });
+    }
+
+    return res;
+  };
+
+  // Carrega script oficial do Google Identity Services
   useEffect(() => {
     const script = document.createElement('script');
     script.src = 'https://accounts.google.com/gsi/client';
@@ -184,17 +257,18 @@ export default function App() {
           root_folder_name: cfg.root_folder_name || '',
           organize_by_subfolders: cfg.organize_by_subfolders ?? true,
           max_upload_size_mb: cfg.max_upload_size_mb || 150,
-          custom_categories: mergedCats,
-          google_refresh_token: cfg.google_refresh_token || ''
+          custom_categories: mergedCats
         });
 
-        if (cfg.google_refresh_token || localStorage.getItem('stl_permanent_google_token')) {
+        const cachedToken = localStorage.getItem('stl_google_access_token');
+        const expiry = Number(localStorage.getItem('stl_google_token_expiry') || 0);
+        if (cachedToken && Date.now() < expiry) {
+          setGoogleToken(cachedToken);
           setGoogleConnected(true);
-          const cachedToken = localStorage.getItem('stl_permanent_google_token');
-          if (cachedToken) {
-            setGoogleToken(cachedToken);
-            fetchUserInfo(cachedToken);
-          }
+          fetchUserInfo(cachedToken);
+        } else if (cfg.google_refresh_token) {
+          // Marca como conectado para permitir renovação automática sob demanda
+          setGoogleConnected(true);
         }
       } else if (localCachedCats.length > 0) {
         setSettings((prev) => ({ ...prev, custom_categories: localCachedCats }));
@@ -233,8 +307,13 @@ export default function App() {
       const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
         headers: { Authorization: `Bearer ${token}` }
       });
-      const info = await res.json();
-      if (info.email) setGoogleUserEmail(info.email);
+      if (res.ok) {
+        const info = await res.json();
+        if (info.email) {
+          setGoogleUserEmail(info.email);
+          localStorage.setItem('stl_google_email', info.email);
+        }
+      }
     } catch {
       // ignora
     }
@@ -260,16 +339,14 @@ export default function App() {
         }
 
         const token = response.access_token;
-        setGoogleToken(token);
-        setGoogleConnected(true);
-        localStorage.setItem('stl_permanent_google_token', token);
+        saveTokenData(token, response.expires_in || 3500);
 
         if (supabase && session?.user) {
           await supabase
             .from('user_settings')
             .upsert({
               user_id: session.user.id,
-              google_refresh_token: 'active_session_token',
+              google_refresh_token: 'connected',
               root_folder_id: settings.root_folder_id,
               root_folder_name: settings.root_folder_name,
               organize_by_subfolders: settings.organize_by_subfolders,
@@ -280,21 +357,24 @@ export default function App() {
         }
 
         await fetchUserInfo(token);
-        showToast('Conta Google conectada permanentemente!');
+        showToast('Conta Google conectada com sucesso!');
         if (!settings.root_folder_id) {
-          openFolderPicker(token);
+          openFolderPicker();
         }
       }
     });
 
-    tokenClient.requestAccessToken({ prompt: 'consent' });
+    tokenClientRef.current = tokenClient;
+    tokenClient.requestAccessToken({ prompt: '' });
   };
 
   const handleDisconnectGoogle = async () => {
     setGoogleToken('');
     setGoogleUserEmail('');
     setGoogleConnected(false);
-    localStorage.removeItem('stl_permanent_google_token');
+    localStorage.removeItem('stl_google_access_token');
+    localStorage.removeItem('stl_google_token_expiry');
+    localStorage.removeItem('stl_google_email');
 
     if (supabase && session?.user) {
       await supabase
@@ -311,10 +391,9 @@ export default function App() {
   // ============================================================================
   // CRIAÇÃO E BUSCA DE SUBPASTAS DE CATEGORIA DENTRO DA PASTA RAIZ NO DRIVE
   // ============================================================================
-  const ensureCategorySubfolderInDrive = async (categoryName, rootIdOverride, tokenOverride) => {
-    const activeToken = tokenOverride || googleToken || localStorage.getItem('stl_permanent_google_token');
+  const ensureCategorySubfolderInDrive = async (categoryName, rootIdOverride) => {
     const rootId = rootIdOverride || settings.root_folder_id;
-    if (!activeToken || !rootId || !categoryName) return rootId;
+    if (!rootId || !categoryName) return rootId;
 
     const trimmedCategory = categoryName.trim();
     const safeName = trimmedCategory.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -322,9 +401,8 @@ export default function App() {
       `mimeType = 'application/vnd.google-apps.folder' and name = '${safeName}' and '${rootId}' in parents and trashed = false`
     );
 
-    const searchRes = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`,
-      { headers: { Authorization: `Bearer ${activeToken}` } }
+    const searchRes = await googleDriveFetch(
+      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`
     );
 
     if (searchRes.ok) {
@@ -334,13 +412,9 @@ export default function App() {
       }
     }
 
-    // Caso a subpasta da categoria ainda não exista dentro da pasta raiz, cria agora
-    const createRes = await fetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
+    const createRes = await googleDriveFetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${activeToken}`,
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: trimmedCategory,
         mimeType: 'application/vnd.google-apps.folder',
@@ -349,25 +423,26 @@ export default function App() {
     });
 
     if (!createRes.ok) {
-      throw new Error(`Não foi possível criar a subpasta "${trimmedCategory}" no Google Drive.`);
+      const errBody = await createRes.json().catch(() => ({}));
+      throw new Error(
+        errBody?.error?.message || `Não foi possível criar a subpasta "${trimmedCategory}" no Google Drive.`
+      );
     }
     const created = await createRes.json();
     return created.id;
   };
 
-  // Sincroniza todas as categorias (Base + Personalizadas) criando as subpastas na pasta raiz
   const handleSyncAllCategorySubfolders = async (rootIdOverride) => {
-    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
     const rootId = rootIdOverride || settings.root_folder_id;
-    if (!activeToken || !rootId) {
-      showToast('Conecte o Google Drive e selecione uma pasta raiz primeiro.', 'error');
+    if (!rootId) {
+      showToast('Selecione uma pasta raiz primeiro.', 'error');
       return;
     }
 
     setSyncingCategoryFolders(true);
     try {
       for (const cat of allCategories) {
-        await ensureCategorySubfolderInDrive(cat, rootId, activeToken);
+        await ensureCategorySubfolderInDrive(cat, rootId);
       }
       showToast(`Todas as ${allCategories.length} subpastas de categorias foram verificadas/criadas na pasta raiz!`);
     } catch (err) {
@@ -416,9 +491,7 @@ export default function App() {
         });
     }
 
-    // Se a organização por subpastas estiver ativa e a pasta raiz configurada, já cria a pasta no Drive
-    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
-    if (settings.organize_by_subfolders && settings.root_folder_id && activeToken) {
+    if (settings.organize_by_subfolders && settings.root_folder_id && googleConnected) {
       try {
         await ensureCategorySubfolderInDrive(trimmed);
       } catch (err) {
@@ -437,11 +510,7 @@ export default function App() {
     setNewCategoryName('');
     setAddingCategoryContext(null);
     setSavingCategory(false);
-    showToast(
-      settings.organize_by_subfolders && settings.root_folder_id
-        ? `Categoria "${trimmed}" salva e subpasta criada no Google Drive!`
-        : `Categoria "${trimmed}" adicionada permanentemente!`
-    );
+    showToast(`Categoria "${trimmed}" salva com sucesso!`);
   };
 
   const handleRemoveCustomCategory = async (catToRemove) => {
@@ -463,7 +532,7 @@ export default function App() {
           updated_at: new Date().toISOString()
         });
     }
-    showToast(`Categoria "${catToRemove}" removida da lista (arquivos no Drive preservados).`);
+    showToast(`Categoria "${catToRemove}" removida da lista.`);
   };
 
   const handleSupabaseAuth = async (e) => {
@@ -485,20 +554,14 @@ export default function App() {
     }
   };
 
-  const openFolderPicker = async (tokenOverride) => {
-    const activeToken = tokenOverride || googleToken || localStorage.getItem('stl_permanent_google_token');
-    if (!activeToken) {
-      showToast('Conecte sua conta Google primeiro.', 'error');
-      return;
-    }
+  const openFolderPicker = async () => {
     setFolderPickerOpen(true);
     setLoadingFolders(true);
     setPendingFolderSelection(null);
     try {
       const q = encodeURIComponent("mimeType = 'application/vnd.google-apps.folder' and trashed = false");
-      const res = await fetch(
-        `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime)&pageSize=50`,
-        { headers: { Authorization: `Bearer ${activeToken}` } }
+      const res = await googleDriveFetch(
+        `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime)&pageSize=50`
       );
       if (!res.ok) throw new Error('Falha ao listar pastas do Google Drive.');
       const data = await res.json();
@@ -511,16 +574,12 @@ export default function App() {
   };
 
   const handleCreateRootFolder = async () => {
-    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
-    if (!activeToken || !newFolderName.trim()) return;
+    if (!newFolderName.trim()) return;
     setLoadingFolders(true);
     try {
-      const res = await fetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
+      const res = await googleDriveFetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${activeToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: newFolderName.trim(),
           mimeType: 'application/vnd.google-apps.folder'
@@ -562,7 +621,7 @@ export default function App() {
     setSettings(updated);
     setPendingFolderSelection(null);
     setFolderPickerOpen(false);
-    showToast(`Pasta raiz vinculada: ${folderName}. Sincronizando subpastas de categorias...`);
+    showToast(`Pasta raiz vinculada: ${folderName}. Sincronizando subpastas...`);
 
     if (updated.organize_by_subfolders) {
       await handleSyncAllCategorySubfolders(folderId);
@@ -585,19 +644,16 @@ export default function App() {
       });
     showToast('Configurações atualizadas!');
 
-    // Se o usuário acabou de ativar a organização por subpastas, cria as pastas das categorias
     if (newPartial.organize_by_subfolders === true && merged.root_folder_id) {
       await handleSyncAllCategorySubfolders(merged.root_folder_id);
     }
   };
 
+  // ============================================================================
+  // UPLOAD DIRETO PARA O GOOGLE DRIVE (COM AUTO-RENOVAÇÃO DE TOKEN)
+  // ============================================================================
   const handleUploadNewModel = async (e) => {
     e.preventDefault();
-    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
-    if (!activeToken) {
-      showToast('Conecte sua conta Google antes de enviar arquivos.', 'error');
-      return;
-    }
     if (!settings.root_folder_id) {
       showToast('Configure a pasta raiz Biblioteca STL antes de enviar arquivos.', 'error');
       setFolderPickerOpen(true);
@@ -621,12 +677,12 @@ export default function App() {
     try {
       setUploadStep(
         settings.organize_by_subfolders
-          ? `Verificando/criando subpasta da categoria "${uploadForm.category}" no Drive...`
+          ? `Verificando/criando subpasta "${uploadForm.category}" no Google Drive...`
           : 'Verificando pasta raiz no Google Drive...'
       );
       targetFolderId = await getTargetUploadFolderId(uploadForm.category);
 
-      setUploadStep(`Enviando arquivo ZIP para a pasta "${settings.organize_by_subfolders ? uploadForm.category : settings.root_folder_name}"...`);
+      setUploadStep(`Enviando arquivo ZIP para o Google Drive...`);
       const metadata = {
         name: uploadForm.zipFile.name,
         parents: [targetFolderId],
@@ -637,16 +693,19 @@ export default function App() {
       formData.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
       formData.append('file', uploadForm.zipFile);
 
-      const driveRes = await fetch(
+      const driveRes = await googleDriveFetch(
         'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,size,webViewLink',
         {
           method: 'POST',
-          headers: { Authorization: `Bearer ${activeToken}` },
           body: formData
         }
       );
 
-      if (!driveRes.ok) throw new Error('Falha no upload para o Google Drive.');
+      if (!driveRes.ok) {
+        const errBody = await driveRes.json().catch(() => ({}));
+        throw new Error(errBody?.error?.message || `Erro ${driveRes.status} ao enviar arquivo para o Google Drive.`);
+      }
+
       uploadedDriveData = await driveRes.json();
 
       await completeDatabaseRegistration(uploadedDriveData, targetFolderId, uploadForm);
@@ -655,7 +714,7 @@ export default function App() {
         name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFile: null
       });
       setPendingRecovery(null);
-      showToast(`Modelo enviado para a subpasta "${uploadForm.category}" e catalogado!`);
+      showToast(`Modelo enviado para o Drive e catalogado com sucesso!`);
       setActiveTab('catalogo');
       loadUserData();
     } catch (err) {
@@ -739,17 +798,14 @@ export default function App() {
 
   // Busca arquivos ZIP tanto na pasta raiz quanto dentro das subpastas de categorias
   const fetchExistingDriveZips = async () => {
-    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
-    if (!activeToken || !settings.root_folder_id) return;
+    if (!settings.root_folder_id) return;
     setLoadingDriveZips(true);
     try {
-      // 1. Busca todas as subpastas diretas dentro da pasta raiz
       const subFoldersQ = encodeURIComponent(
         `'${settings.root_folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
       );
-      const subRes = await fetch(
-        `https://www.googleapis.com/drive/v3/files?q=${subFoldersQ}&fields=files(id,name)&pageSize=100`,
-        { headers: { Authorization: `Bearer ${activeToken}` } }
+      const subRes = await googleDriveFetch(
+        `https://www.googleapis.com/drive/v3/files?q=${subFoldersQ}&fields=files(id,name)&pageSize=100`
       );
       const subData = subRes.ok ? await subRes.json() : { files: [] };
       const subFolders = subData.files || [];
@@ -762,15 +818,13 @@ export default function App() {
       const allParentIds = [settings.root_folder_id, ...subFolders.map((f) => f.id)];
       const parentsCondition = allParentIds.map((id) => `'${id}' in parents`).join(' or ');
 
-      // 2. Busca todos os arquivos .ZIP na raiz e nas subpastas de categoria
       const zipsQ = encodeURIComponent(
         `(${parentsCondition}) and (mimeType = 'application/zip' or mimeType = 'application/x-zip-compressed' or name contains '.zip') and trashed = false`
       );
-      const res = await fetch(
-        `https://www.googleapis.com/drive/v3/files?q=${zipsQ}&fields=files(id,name,size,createdTime,webViewLink,parents)&pageSize=100`,
-        { headers: { Authorization: `Bearer ${activeToken}` } }
+      const res = await googleDriveFetch(
+        `https://www.googleapis.com/drive/v3/files?q=${zipsQ}&fields=files(id,name,size,createdTime,webViewLink,parents)&pageSize=100`
       );
-      if (!res.ok) throw new Error('Erro ao listar arquivos ZIP.');
+      if (!res.ok) throw new Error('Erro ao listar arquivos ZIP do Google Drive.');
       const data = await res.json();
 
       const enrichedFiles = (data.files || []).map((file) => {
@@ -793,11 +847,10 @@ export default function App() {
   };
 
   useEffect(() => {
-    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
-    if (activeTab === 'importar' && activeToken && settings.root_folder_id) {
+    if (activeTab === 'importar' && googleConnected && settings.root_folder_id) {
       fetchExistingDriveZips();
     }
-  }, [activeTab, googleToken, settings.root_folder_id]);
+  }, [activeTab, googleConnected, settings.root_folder_id]);
 
   const handleConfirmImport = async (e) => {
     e.preventDefault();
@@ -824,13 +877,11 @@ export default function App() {
   };
 
   const verifyDriveFileAvailability = async (model) => {
-    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
-    if (!activeToken) return;
+    if (!googleConnected) return;
     setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'checking' }));
     try {
-      const res = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${model.drive_file_id}?fields=id,name,trashed`,
-        { headers: { Authorization: `Bearer ${activeToken}` } }
+      const res = await googleDriveFetch(
+        `https://www.googleapis.com/drive/v3/files/${model.drive_file_id}?fields=id,name,trashed`
       );
       if (!res.ok) {
         setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'missing' }));
@@ -848,8 +899,7 @@ export default function App() {
 
   const handleOpenDetails = (model) => {
     setSelectedModel(model);
-    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
-    if (activeToken) {
+    if (googleConnected) {
       verifyDriveFileAvailability(model);
     }
   };
@@ -899,24 +949,38 @@ export default function App() {
     }
   };
 
+  // ============================================================================
+  // EXCLUSÃO CORRIGIDA (Trata renovação de token, DELETE e Fallback de Lixeira)
+  // ============================================================================
   const handleDeleteModel = async () => {
     if (!deleteConfirmModel) return;
     setUploading(true);
     try {
       if (deleteAlsoFromDrive) {
-        const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
-        if (!activeToken) {
-          throw new Error('Conecte sua conta Google para excluir o arquivo.');
-        }
-        const driveDel = await fetch(
+        // 1. Tenta excluir permanentemente via API v3
+        let driveDel = await googleDriveFetch(
           `https://www.googleapis.com/drive/v3/files/${deleteConfirmModel.drive_file_id}`,
-          {
-            method: 'DELETE',
-            headers: { Authorization: `Bearer ${activeToken}` }
-          }
+          { method: 'DELETE' }
         );
+
+        // 2. Se falhar por restrição de escopo (ex: 403 em arquivo antigo), tenta mover para a lixeira (trashed = true)
         if (!driveDel.ok && driveDel.status !== 404) {
-          throw new Error('Não foi possível excluir o arquivo no Google Drive.');
+          const trashRes = await googleDriveFetch(
+            `https://www.googleapis.com/drive/v3/files/${deleteConfirmModel.drive_file_id}`,
+            {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ trashed: true })
+            }
+          );
+
+          if (!trashRes.ok) {
+            const errData = await trashRes.json().catch(() => ({}));
+            throw new Error(
+              errData?.error?.message ||
+                'O escopo drive.file permite excluir pelo app apenas arquivos enviados pelo próprio app. Desmarque a caixa para remover do catálogo e apague o ZIP manualmente no Drive.'
+            );
+          }
         }
       }
 
@@ -931,7 +995,11 @@ export default function App() {
 
       if (error) throw error;
 
-      showToast(deleteAlsoFromDrive ? 'Excluído do catálogo e do Drive.' : 'Removido do catálogo (ZIP preservado).');
+      showToast(
+        deleteAlsoFromDrive
+          ? 'Excluído do catálogo e do Google Drive com sucesso!'
+          : 'Removido do catálogo (arquivo ZIP preservado no Drive).'
+      );
       setDeleteConfirmModel(null);
       setDeleteAlsoFromDrive(false);
       setSelectedModel(null);
@@ -1469,7 +1537,7 @@ export default function App() {
               </div>
               <button
                 onClick={fetchExistingDriveZips}
-                disabled={loadingDriveZips || !googleConnected}
+                disabled={loadingDriveZips}
                 className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer"
               >
                 <RefreshCw className={`w-4 h-4 ${loadingDriveZips ? 'animate-spin' : ''}`} />
@@ -1477,7 +1545,7 @@ export default function App() {
               </button>
             </div>
 
-            {!googleConnected || !settings.root_folder_id ? (
+            {!settings.root_folder_id ? (
               <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 text-center text-sm text-[#8c877e]">
                 Conecte o Google e selecione a pasta raiz.
               </div>
@@ -1558,7 +1626,7 @@ export default function App() {
                   <HardDrive className="w-6 h-6 text-[#e4e0d7] shrink-0" />
                   <div>
                     <h3 className="font-bold text-[#e4e0d7] text-base">Google Drive (Armazenamento Principal)</h3>
-                    <p className="text-xs text-[#8c877e]">Sessão persistente e subpastas automáticas</p>
+                    <p className="text-xs text-[#8c877e]">Renovação automática de sessão ativa</p>
                   </div>
                 </div>
                 <span className={`px-3 py-1 rounded-full text-xs font-semibold ${googleConnected ? 'bg-[#4d7c5b]/15 text-[#70a37f] border border-[#4d7c5b]/30' : 'bg-[#c89d66]/15 text-[#c89d66]'}`}>
@@ -1578,18 +1646,17 @@ export default function App() {
               </div>
 
               <div className="flex flex-wrap gap-2.5">
-                {!googleConnected ? (
-                  <button
-                    onClick={handleConnectGoogle}
-                    className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
-                  >
-                    Conectar Conta Google
-                  </button>
-                ) : (
+                <button
+                  onClick={handleConnectGoogle}
+                  className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
+                >
+                  {googleConnected ? 'Renovar Autorização Google' : 'Conectar Conta Google'}
+                </button>
+                {googleConnected && (
                   <>
                     <button
                       onClick={() => openFolderPicker()}
-                      className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
+                      className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold cursor-pointer"
                     >
                       Selecionar Outra Pasta Raiz
                     </button>
@@ -1601,7 +1668,7 @@ export default function App() {
                         className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center gap-2 cursor-pointer"
                       >
                         <FolderPlus className={`w-4 h-4 text-[#c89d66] ${syncingCategoryFolders ? 'animate-spin' : ''}`} />
-                        <span>{syncingCategoryFolders ? 'Criando Subpastas...' : 'Criar/Sincronizar Subpastas de Categorias no Drive'}</span>
+                        <span>{syncingCategoryFolders ? 'Criando Subpastas...' : 'Sincronizar Subpastas de Categorias no Drive'}</span>
                       </button>
                     )}
                     <button
@@ -1810,7 +1877,9 @@ export default function App() {
             </label>
             <div className="flex justify-end gap-2 pt-2">
               <button onClick={() => setDeleteConfirmModel(null)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
-              <button onClick={handleDeleteModel} className="px-4 py-2 bg-[#b94a48] text-white rounded-xl text-xs font-bold">Confirmar Exclusão</button>
+              <button onClick={handleDeleteModel} disabled={uploading} className="px-4 py-2 bg-[#b94a48] text-white rounded-xl text-xs font-bold cursor-pointer">
+                {uploading ? 'Excluindo...' : 'Confirmar Exclusão'}
+              </button>
             </div>
           </div>
         </div>
