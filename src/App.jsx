@@ -60,10 +60,11 @@ export default function App() {
   const [googleUserEmail, setGoogleUserEmail] = useState('');
   const [googleConnected, setGoogleConnected] = useState(false);
 
+  // Organização por subpastas de categoria ativa por padrão (true)
   const [settings, setSettings] = useState({
     root_folder_id: '',
     root_folder_name: '',
-    organize_by_subfolders: false,
+    organize_by_subfolders: true,
     max_upload_size_mb: 150,
     custom_categories: [],
     google_refresh_token: ''
@@ -72,6 +73,7 @@ export default function App() {
   const [addingCategoryContext, setAddingCategoryContext] = useState(null);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [savingCategory, setSavingCategory] = useState(false);
+  const [syncingCategoryFolders, setSyncingCategoryFolders] = useState(false);
 
   const [models, setModels] = useState([]);
   const [signedUrls, setSignedUrls] = useState({});
@@ -180,7 +182,7 @@ export default function App() {
         setSettings({
           root_folder_id: cfg.root_folder_id || '',
           root_folder_name: cfg.root_folder_name || '',
-          organize_by_subfolders: cfg.organize_by_subfolders || false,
+          organize_by_subfolders: cfg.organize_by_subfolders ?? true,
           max_upload_size_mb: cfg.max_upload_size_mb || 150,
           custom_categories: mergedCats,
           google_refresh_token: cfg.google_refresh_token || ''
@@ -306,6 +308,82 @@ export default function App() {
     showToast('Conta Google desconectada.');
   };
 
+  // ============================================================================
+  // CRIAÇÃO E BUSCA DE SUBPASTAS DE CATEGORIA DENTRO DA PASTA RAIZ NO DRIVE
+  // ============================================================================
+  const ensureCategorySubfolderInDrive = async (categoryName, rootIdOverride, tokenOverride) => {
+    const activeToken = tokenOverride || googleToken || localStorage.getItem('stl_permanent_google_token');
+    const rootId = rootIdOverride || settings.root_folder_id;
+    if (!activeToken || !rootId || !categoryName) return rootId;
+
+    const trimmedCategory = categoryName.trim();
+    const safeName = trimmedCategory.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const q = encodeURIComponent(
+      `mimeType = 'application/vnd.google-apps.folder' and name = '${safeName}' and '${rootId}' in parents and trashed = false`
+    );
+
+    const searchRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`,
+      { headers: { Authorization: `Bearer ${activeToken}` } }
+    );
+
+    if (searchRes.ok) {
+      const searchData = await searchRes.json();
+      if (searchData.files?.length > 0) {
+        return searchData.files[0].id;
+      }
+    }
+
+    // Caso a subpasta da categoria ainda não exista dentro da pasta raiz, cria agora
+    const createRes = await fetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${activeToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: trimmedCategory,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [rootId]
+      })
+    });
+
+    if (!createRes.ok) {
+      throw new Error(`Não foi possível criar a subpasta "${trimmedCategory}" no Google Drive.`);
+    }
+    const created = await createRes.json();
+    return created.id;
+  };
+
+  // Sincroniza todas as categorias (Base + Personalizadas) criando as subpastas na pasta raiz
+  const handleSyncAllCategorySubfolders = async (rootIdOverride) => {
+    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
+    const rootId = rootIdOverride || settings.root_folder_id;
+    if (!activeToken || !rootId) {
+      showToast('Conecte o Google Drive e selecione uma pasta raiz primeiro.', 'error');
+      return;
+    }
+
+    setSyncingCategoryFolders(true);
+    try {
+      for (const cat of allCategories) {
+        await ensureCategorySubfolderInDrive(cat, rootId, activeToken);
+      }
+      showToast(`Todas as ${allCategories.length} subpastas de categorias foram verificadas/criadas na pasta raiz!`);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setSyncingCategoryFolders(false);
+    }
+  };
+
+  const getTargetUploadFolderId = async (categoryName) => {
+    if (!settings.organize_by_subfolders || !categoryName) {
+      return settings.root_folder_id;
+    }
+    return await ensureCategorySubfolderInDrive(categoryName);
+  };
+
   const handleAddPermanentCategory = async (targetContext) => {
     const trimmed = newCategoryName.trim();
     if (!trimmed) return;
@@ -338,6 +416,16 @@ export default function App() {
         });
     }
 
+    // Se a organização por subpastas estiver ativa e a pasta raiz configurada, já cria a pasta no Drive
+    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
+    if (settings.organize_by_subfolders && settings.root_folder_id && activeToken) {
+      try {
+        await ensureCategorySubfolderInDrive(trimmed);
+      } catch (err) {
+        console.warn('Erro ao criar subpasta automática:', err);
+      }
+    }
+
     if (targetContext === 'upload') {
       setUploadForm((prev) => ({ ...prev, category: trimmed }));
     } else if (targetContext === 'import') {
@@ -349,7 +437,11 @@ export default function App() {
     setNewCategoryName('');
     setAddingCategoryContext(null);
     setSavingCategory(false);
-    showToast(`Categoria "${trimmed}" adicionada permanentemente!`);
+    showToast(
+      settings.organize_by_subfolders && settings.root_folder_id
+        ? `Categoria "${trimmed}" salva e subpasta criada no Google Drive!`
+        : `Categoria "${trimmed}" adicionada permanentemente!`
+    );
   };
 
   const handleRemoveCustomCategory = async (catToRemove) => {
@@ -371,7 +463,7 @@ export default function App() {
           updated_at: new Date().toISOString()
         });
     }
-    showToast(`Categoria "${catToRemove}" removida.`);
+    showToast(`Categoria "${catToRemove}" removida da lista (arquivos no Drive preservados).`);
   };
 
   const handleSupabaseAuth = async (e) => {
@@ -470,7 +562,11 @@ export default function App() {
     setSettings(updated);
     setPendingFolderSelection(null);
     setFolderPickerOpen(false);
-    showToast(`Pasta raiz vinculada: ${folderName} (ID: ${folderId})`);
+    showToast(`Pasta raiz vinculada: ${folderName}. Sincronizando subpastas de categorias...`);
+
+    if (updated.organize_by_subfolders) {
+      await handleSyncAllCategorySubfolders(folderId);
+    }
   };
 
   const handleSaveGeneralSettings = async (newPartial) => {
@@ -488,42 +584,11 @@ export default function App() {
         updated_at: new Date().toISOString()
       });
     showToast('Configurações atualizadas!');
-  };
 
-  const getOrCreateCategorySubfolder = async (categoryName) => {
-    const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
-    if (!settings.organize_by_subfolders || !categoryName) {
-      return settings.root_folder_id;
+    // Se o usuário acabou de ativar a organização por subpastas, cria as pastas das categorias
+    if (newPartial.organize_by_subfolders === true && merged.root_folder_id) {
+      await handleSyncAllCategorySubfolders(merged.root_folder_id);
     }
-    const safeName = categoryName.replace(/'/g, "\\'");
-    const q = encodeURIComponent(
-      `mimeType = 'application/vnd.google-apps.folder' and name = '${safeName}' and '${settings.root_folder_id}' in parents and trashed = false`
-    );
-    const searchRes = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`,
-      { headers: { Authorization: `Bearer ${activeToken}` } }
-    );
-    if (searchRes.ok) {
-      const searchData = await searchRes.json();
-      if (searchData.files?.length > 0) {
-        return searchData.files[0].id;
-      }
-    }
-    const createRes = await fetch('https://www.googleapis.com/drive/v3/files?fields=id', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${activeToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        name: categoryName,
-        mimeType: 'application/vnd.google-apps.folder',
-        parents: [settings.root_folder_id]
-      })
-    });
-    if (!createRes.ok) return settings.root_folder_id;
-    const created = await createRes.json();
-    return created.id;
   };
 
   const handleUploadNewModel = async (e) => {
@@ -551,12 +616,17 @@ export default function App() {
 
     setUploading(true);
     let uploadedDriveData = null;
+    let targetFolderId = settings.root_folder_id;
 
     try {
-      setUploadStep('Verificando pasta de destino no Google Drive...');
-      const targetFolderId = await getOrCreateCategorySubfolder(uploadForm.category);
+      setUploadStep(
+        settings.organize_by_subfolders
+          ? `Verificando/criando subpasta da categoria "${uploadForm.category}" no Drive...`
+          : 'Verificando pasta raiz no Google Drive...'
+      );
+      targetFolderId = await getTargetUploadFolderId(uploadForm.category);
 
-      setUploadStep('Enviando arquivo ZIP diretamente para o Google Drive...');
+      setUploadStep(`Enviando arquivo ZIP para a pasta "${settings.organize_by_subfolders ? uploadForm.category : settings.root_folder_name}"...`);
       const metadata = {
         name: uploadForm.zipFile.name,
         parents: [targetFolderId],
@@ -585,14 +655,14 @@ export default function App() {
         name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFile: null
       });
       setPendingRecovery(null);
-      showToast('Modelo enviado para o Drive e catalogado com sucesso!');
+      showToast(`Modelo enviado para a subpasta "${uploadForm.category}" e catalogado!`);
       setActiveTab('catalogo');
       loadUserData();
     } catch (err) {
       if (uploadedDriveData?.id) {
         setPendingRecovery({
           driveData: uploadedDriveData,
-          folderId: settings.root_folder_id,
+          folderId: targetFolderId,
           formSnapshot: { ...uploadForm }
         });
         showToast('O ZIP foi enviado ao Drive, mas houve falha ao salvar no banco. Use o botão de recuperação abaixo!', 'error');
@@ -667,21 +737,54 @@ export default function App() {
     }
   };
 
+  // Busca arquivos ZIP tanto na pasta raiz quanto dentro das subpastas de categorias
   const fetchExistingDriveZips = async () => {
     const activeToken = googleToken || localStorage.getItem('stl_permanent_google_token');
     if (!activeToken || !settings.root_folder_id) return;
     setLoadingDriveZips(true);
     try {
-      const q = encodeURIComponent(
-        `'${settings.root_folder_id}' in parents and (mimeType = 'application/zip' or mimeType = 'application/x-zip-compressed' or name contains '.zip') and trashed = false`
+      // 1. Busca todas as subpastas diretas dentro da pasta raiz
+      const subFoldersQ = encodeURIComponent(
+        `'${settings.root_folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
+      );
+      const subRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${subFoldersQ}&fields=files(id,name)&pageSize=100`,
+        { headers: { Authorization: `Bearer ${activeToken}` } }
+      );
+      const subData = subRes.ok ? await subRes.json() : { files: [] };
+      const subFolders = subData.files || [];
+
+      const folderMap = { [settings.root_folder_id]: 'Pasta Raiz' };
+      subFolders.forEach((sf) => {
+        folderMap[sf.id] = sf.name;
+      });
+
+      const allParentIds = [settings.root_folder_id, ...subFolders.map((f) => f.id)];
+      const parentsCondition = allParentIds.map((id) => `'${id}' in parents`).join(' or ');
+
+      // 2. Busca todos os arquivos .ZIP na raiz e nas subpastas de categoria
+      const zipsQ = encodeURIComponent(
+        `(${parentsCondition}) and (mimeType = 'application/zip' or mimeType = 'application/x-zip-compressed' or name contains '.zip') and trashed = false`
       );
       const res = await fetch(
-        `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,size,createdTime,webViewLink)&pageSize=100`,
+        `https://www.googleapis.com/drive/v3/files?q=${zipsQ}&fields=files(id,name,size,createdTime,webViewLink,parents)&pageSize=100`,
         { headers: { Authorization: `Bearer ${activeToken}` } }
       );
       if (!res.ok) throw new Error('Erro ao listar arquivos ZIP.');
       const data = await res.json();
-      setDriveZipFiles(data.files || []);
+
+      const enrichedFiles = (data.files || []).map((file) => {
+        const parentId = file.parents?.[0] || settings.root_folder_id;
+        const folderLabel = folderMap[parentId] || 'Pasta Raiz';
+        return {
+          ...file,
+          detectedFolderId: parentId,
+          detectedCategory: folderLabel !== 'Pasta Raiz' ? folderLabel : 'Geral',
+          folderLabel
+        };
+      });
+
+      setDriveZipFiles(enrichedFiles);
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -707,7 +810,8 @@ export default function App() {
 
     setUploading(true);
     try {
-      await completeDatabaseRegistration(importingFile, settings.root_folder_id, importForm);
+      const targetFolderId = importingFile.detectedFolderId || settings.root_folder_id;
+      await completeDatabaseRegistration(importingFile, targetFolderId, importForm);
       showToast(`Arquivo "${importingFile.name}" importado!`);
       setImportingFile(null);
       loadUserData();
@@ -839,10 +943,24 @@ export default function App() {
     }
   };
 
+  const renderLogo = (sizeClass = 'w-10 h-10') => (
+    <div className={`${sizeClass} rounded-xl overflow-hidden bg-[#e4e0d7] flex items-center justify-center border border-[#262522] shrink-0`}>
+      <img
+        src="/logo.png"
+        alt="Biblioteca STL Logo"
+        className="w-full h-full object-cover"
+        onError={(e) => {
+          e.target.style.display = 'none';
+          e.target.parentElement.innerHTML = '<svg class="w-5 h-5 text-[#000000]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>';
+        }}
+      />
+    </div>
+  );
+
   const renderCategorySelector = (currentValue, onSelectChange, contextKey) => (
     <div>
       <div className="flex items-center justify-between mb-1">
-        <label className="block text-xs font-medium text-[#a39e93]">Categoria</label>
+        <label className="block text-xs font-medium text-[#a39e93]">Categoria (Subpasta no Drive)</label>
         <button
           type="button"
           onClick={() => {
@@ -929,13 +1047,7 @@ export default function App() {
       <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex items-center justify-center p-4">
         <div className="max-w-md w-full bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 shadow-2xl space-y-6">
           <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-xl overflow-hidden bg-[#e4e0d7] flex items-center justify-center border border-[#262522]">
-              <img
-                src="/logo.png"
-                alt="Biblioteca STL Logo"
-                className="w-full h-full object-cover"
-              />
-            </div>
+            {renderLogo('w-11 h-11')}
             <div>
               <h1 className="text-2xl font-bold text-[#e4e0d7] tracking-tight">Biblioteca STL</h1>
               <p className="text-xs text-[#a39e93]">Catálogo Pessoal &bull; Google Drive + Supabase</p>
@@ -1010,24 +1122,19 @@ export default function App() {
       <header className="border-b border-[#1f1e1c] bg-[#000000]/95 backdrop-blur sticky top-0 z-30">
         <div className="max-w-7xl mx-auto px-3 sm:px-6 h-16 flex items-center justify-between gap-2 sm:gap-4">
           <div className="flex items-center gap-2.5">
-            <div className="w-10 h-10 rounded-xl overflow-hidden bg-[#e4e0d7] flex items-center justify-center border border-[#262522]">
-              <img
-                src="/logo.png"
-                alt="Biblioteca STL Logo"
-                className="w-full h-full object-cover"
-              />
-            </div>
+            {renderLogo('w-9 h-9')}
             <div>
               <h1 className="font-bold text-base sm:text-lg text-[#e4e0d7] leading-tight tracking-tight">Biblioteca STL</h1>
-              <p className="text-[11px] text-[#8c877e] hidden md:block">Google Drive &bull; Catálogo Pessoal</p>
+              <p className="text-[11px] text-[#8c877e] hidden md:block">Google Drive &bull; Subpastas por Categoria</p>
             </div>
           </div>
 
           <nav className="flex items-center gap-1 sm:gap-2 overflow-x-auto py-1">
             <button
               onClick={() => setActiveTab('catalogo')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-                }`}
+              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
+                activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+              }`}
             >
               <Box className="w-4 h-4" />
               <span>Catálogo ({models.length})</span>
@@ -1035,8 +1142,9 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('upload')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'upload' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-                }`}
+              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
+                activeTab === 'upload' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+              }`}
             >
               <Upload className="w-4 h-4" />
               <span>Enviar</span>
@@ -1044,8 +1152,9 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('importar')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'importar' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-                }`}
+              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
+                activeTab === 'importar' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+              }`}
             >
               <FolderDown className="w-4 h-4" />
               <span>Importar</span>
@@ -1053,8 +1162,9 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('configuracoes')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-                }`}
+              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
+                activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+              }`}
             >
               <Settings className="w-4 h-4" />
               <span className="hidden lg:inline">Configurações</span>
@@ -1070,7 +1180,7 @@ export default function App() {
             <div className="flex items-center gap-2.5 text-xs sm:text-sm text-[#e4e0d7]">
               <HardDrive className="w-5 h-5 text-[#c89d66] shrink-0" />
               {!googleConnected ? (
-                <span>Conecte sua conta Google para gerenciar seus arquivos no Google Drive de forma definitiva.</span>
+                <span>Conecte sua conta Google para gerenciar seus arquivos e pastas por categoria no Google Drive.</span>
               ) : (
                 <span>Selecione ou crie a pasta raiz <strong>Biblioteca STL</strong> no seu Google Drive.</span>
               )}
@@ -1117,8 +1227,9 @@ export default function App() {
                   <button
                     key={cat}
                     onClick={() => setSelectedCategory(cat)}
-                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer ${selectedCategory === cat ? 'bg-[#e4e0d7] text-[#000000]' : 'bg-[#0a0a0a] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522]'
-                      }`}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer ${
+                      selectedCategory === cat ? 'bg-[#e4e0d7] text-[#000000]' : 'bg-[#0a0a0a] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522]'
+                    }`}
                   >
                     {cat}
                   </button>
@@ -1137,7 +1248,7 @@ export default function App() {
                 <div className="space-y-1">
                   <h3 className="text-base font-semibold text-[#e4e0d7]">Nenhum modelo STL encontrado</h3>
                   <p className="text-xs text-[#8c877e] max-w-md mx-auto">
-                    Envie um novo arquivo ZIP diretamente para sua pasta raiz do Google Drive ou importe arquivos já existentes.
+                    Envie um novo arquivo ZIP (que será salvo automaticamente na subpasta da categoria no seu Google Drive) ou importe arquivos já existentes.
                   </p>
                 </div>
                 <div className="flex flex-wrap justify-center gap-3 pt-2">
@@ -1221,7 +1332,11 @@ export default function App() {
           <div className="max-w-2xl mx-auto bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-6">
             <div>
               <h2 className="text-lg font-bold text-[#e4e0d7]">Enviar Novo Modelo STL (.ZIP)</h2>
-              <p className="text-xs text-[#8c877e] mt-1">O arquivo ZIP será enviado diretamente para sua pasta raiz no Google Drive.</p>
+              <p className="text-xs text-[#8c877e] mt-1">
+                {settings.organize_by_subfolders
+                  ? `O arquivo ZIP será salvo dentro da subpasta "${uploadForm.category}" na sua pasta raiz "${settings.root_folder_name || 'Biblioteca STL'}".`
+                  : `O arquivo ZIP será enviado diretamente para a pasta raiz "${settings.root_folder_name || 'Biblioteca STL'}".`}
+              </p>
             </div>
 
             {pendingRecovery && (
@@ -1347,8 +1462,10 @@ export default function App() {
           <div className="space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
               <div>
-                <h2 className="text-base sm:text-lg font-bold text-[#e4e0d7]">Importar ZIPs Existentes</h2>
-                <p className="text-xs text-[#8c877e] mt-0.5">Lista arquivos na pasta <strong className="text-[#e4e0d7]">{settings.root_folder_name || 'raiz'}</strong> sem duplicá-los.</p>
+                <h2 className="text-base sm:text-lg font-bold text-[#e4e0d7]">Importar ZIPs da Pasta Raiz e Subpastas</h2>
+                <p className="text-xs text-[#8c877e] mt-0.5">
+                  Reconhece arquivos .ZIP na pasta <strong className="text-[#e4e0d7]">{settings.root_folder_name || 'raiz'}</strong> e em todas as subpastas de categorias.
+                </p>
               </div>
               <button
                 onClick={fetchExistingDriveZips}
@@ -1367,20 +1484,20 @@ export default function App() {
             ) : loadingDriveZips ? (
               <div className="py-16 text-center text-[#a39e93] flex flex-col items-center gap-2">
                 <RefreshCw className="w-6 h-6 animate-spin text-[#e4e0d7]" />
-                <span className="text-xs">Consultando Google Drive...</span>
+                <span className="text-xs">Consultando pasta raiz e subpastas de categorias no Google Drive...</span>
               </div>
             ) : driveZipFiles.length === 0 ? (
               <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 text-center text-sm text-[#8c877e]">
-                Nenhum arquivo .ZIP encontrado na pasta raiz.
+                Nenhum arquivo .ZIP encontrado na pasta raiz ou subpastas.
               </div>
             ) : (
               <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl overflow-x-auto">
-                <table className="w-full text-left border-collapse text-sm min-w-[600px]">
+                <table className="w-full text-left border-collapse text-sm min-w-[640px]">
                   <thead>
                     <tr className="border-b border-[#262522] text-xs text-[#8c877e] bg-[#000000]">
                       <th className="py-3.5 px-4">Arquivo ZIP</th>
+                      <th className="py-3.5 px-4">Local / Subpasta</th>
                       <th className="py-3.5 px-4">Tamanho</th>
-                      <th className="py-3.5 px-4">ID no Drive</th>
                       <th className="py-3.5 px-4 text-right">Status / Ação</th>
                     </tr>
                   </thead>
@@ -1393,8 +1510,12 @@ export default function App() {
                             <FileArchive className="w-4 h-4 text-[#c89d66] shrink-0" />
                             <span className="truncate max-w-[200px] sm:max-w-xs">{df.name}</span>
                           </td>
+                          <td className="py-3.5 px-4 text-xs text-[#a39e93]">
+                            <span className="px-2 py-0.5 rounded bg-[#141413] border border-[#262522]">
+                              {df.folderLabel}
+                            </span>
+                          </td>
                           <td className="py-3.5 px-4 text-xs text-[#8c877e]">{formatBytes(df.size)}</td>
-                          <td className="py-3.5 px-4 text-xs font-mono text-[#6e6a61]">{df.id}</td>
                           <td className="py-3.5 px-4 text-right">
                             {alreadyRegistered ? (
                               <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs bg-[#4d7c5b]/15 text-[#70a37f] border border-[#4d7c5b]/30">
@@ -1407,7 +1528,7 @@ export default function App() {
                                   setImportForm({
                                     name: df.name.replace(/\.zip$/i, ''),
                                     description: '',
-                                    category: 'Geral',
+                                    category: df.detectedCategory || 'Geral',
                                     tags: '',
                                     notes: '',
                                     imageFile: null
@@ -1437,7 +1558,7 @@ export default function App() {
                   <HardDrive className="w-6 h-6 text-[#e4e0d7] shrink-0" />
                   <div>
                     <h3 className="font-bold text-[#e4e0d7] text-base">Google Drive (Armazenamento Principal)</h3>
-                    <p className="text-xs text-[#8c877e]">Sessão persistente ativa</p>
+                    <p className="text-xs text-[#8c877e]">Sessão persistente e subpastas automáticas</p>
                   </div>
                 </div>
                 <span className={`px-3 py-1 rounded-full text-xs font-semibold ${googleConnected ? 'bg-[#4d7c5b]/15 text-[#70a37f] border border-[#4d7c5b]/30' : 'bg-[#c89d66]/15 text-[#c89d66]'}`}>
@@ -1472,6 +1593,17 @@ export default function App() {
                     >
                       Selecionar Outra Pasta Raiz
                     </button>
+                    {settings.root_folder_id && (
+                      <button
+                        type="button"
+                        disabled={syncingCategoryFolders}
+                        onClick={() => handleSyncAllCategorySubfolders()}
+                        className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center gap-2 cursor-pointer"
+                      >
+                        <FolderPlus className={`w-4 h-4 text-[#c89d66] ${syncingCategoryFolders ? 'animate-spin' : ''}`} />
+                        <span>{syncingCategoryFolders ? 'Criando Subpastas...' : 'Criar/Sincronizar Subpastas de Categorias no Drive'}</span>
+                      </button>
+                    )}
                     <button
                       onClick={handleDisconnectGoogle}
                       className="px-4 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs font-semibold cursor-pointer"
@@ -1483,12 +1615,33 @@ export default function App() {
               </div>
             </div>
 
+            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-5">
+              <h3 className="font-bold text-[#e4e0d7] text-base">Organização de Pastas por Categoria</h3>
+
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-sm font-medium text-[#e4e0d7]">Criar e organizar ZIPs em subpastas por categoria</p>
+                  <p className="text-xs text-[#8c877e]">
+                    Quando ativo, cada categoria terá sua própria pasta dentro da pasta raiz do Google Drive.
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={settings.organize_by_subfolders}
+                  onChange={(e) => handleSaveGeneralSettings({ organize_by_subfolders: e.target.checked })}
+                  className="w-5 h-5 accent-[#e4e0d7] cursor-pointer shrink-0"
+                />
+              </div>
+            </div>
+
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-4">
               <div className="flex items-center gap-2.5">
                 <Tag className="w-5 h-5 text-[#e4e0d7]" />
                 <div>
                   <h3 className="font-bold text-[#e4e0d7] text-base">Categorias da Biblioteca</h3>
-                  <p className="text-xs text-[#8c877e]">Categorias base + personalizadas permanentes.</p>
+                  <p className="text-xs text-[#8c877e]">
+                    Ao adicionar uma nova categoria, a subpasta correspondente também é criada dentro da pasta raiz no Drive.
+                  </p>
                 </div>
               </div>
 
@@ -1531,7 +1684,7 @@ export default function App() {
                   onClick={() => handleAddPermanentCategory('settings')}
                   className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
                 >
-                  Adicionar
+                  Adicionar e Criar Pasta
                 </button>
               </div>
             </div>
