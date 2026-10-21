@@ -70,7 +70,6 @@ export default function App() {
     custom_categories: []
   });
 
-  // Lista real de subpastas existentes dentro da pasta raiz no Google Drive
   const [existingSubfolders, setExistingSubfolders] = useState([]);
   const [loadingSubfolders, setLoadingSubfolders] = useState(false);
 
@@ -137,9 +136,6 @@ export default function App() {
     return Array.from(new Set([...BASE_CATEGORIES, ...custom, ...fromModels]));
   }, [settings.custom_categories, models]);
 
-  // ============================================================================
-  // GERENCIADOR INTELIGENTE DE TOKEN GOOGLE
-  // ============================================================================
   const saveTokenData = (token, expiresInSec = 3500) => {
     const expiryTime = Date.now() + expiresInSec * 1000;
     setGoogleToken(token);
@@ -157,7 +153,7 @@ export default function App() {
     }
 
     if (!window.google?.accounts?.oauth2 || !GOOGLE_CLIENT_ID) {
-      throw new Error('Serviço de autenticação do Google não disponível. Recarregue a página.');
+      throw new Error('Serviço de autenticação do Google não disponível.');
     }
 
     return new Promise((resolve, reject) => {
@@ -169,7 +165,7 @@ export default function App() {
         callback: (response) => {
           if (response.error) {
             setGoogleConnected(false);
-            reject(new Error('Sua sessão do Google expirou. Clique em "Conectar Conta Google" novamente.'));
+            reject(new Error('Sua sessão do Google expirou. Conecte novamente.'));
             return;
           }
           saveTokenData(response.access_token, response.expires_in || 3500);
@@ -251,7 +247,6 @@ export default function App() {
         const dbCats = Array.isArray(cfg.custom_categories) ? cfg.custom_categories : [];
         const mergedCats = Array.from(new Set([...dbCats, ...localCachedCats]));
 
-        // Migração automática para garantir que organize_by_subfolders fique true se nunca foi forçado manualmente
         const migrationDone = localStorage.getItem(`stl_subfolders_migrated_${session.user.id}`);
         let shouldUseSubfolders = cfg.organize_by_subfolders ?? true;
         if (!migrationDone) {
@@ -312,7 +307,6 @@ export default function App() {
     }
   };
 
-  // Assim que tiver pasta raiz e Google conectado, lista e monta automaticamente as subpastas que faltarem
   useEffect(() => {
     if (googleConnected && settings.root_folder_id && settings.organize_by_subfolders && !autoSyncedRef.current) {
       autoSyncedRef.current = true;
@@ -410,9 +404,6 @@ export default function App() {
     showToast('Conta Google desconectada.');
   };
 
-  // ============================================================================
-  // MONTAGEM E SINCRONIZAÇÃO DE SUBPASTAS DE CATEGORIAS DENTRO DA PASTA RAIZ
-  // ============================================================================
   const fetchRootSubfolders = async (rootIdOverride) => {
     const rootId = rootIdOverride || settings.root_folder_id;
     if (!rootId) return [];
@@ -441,8 +432,6 @@ export default function App() {
     if (!rootId || !categoryName) return rootId;
 
     const trimmedCategory = categoryName.trim();
-
-    // 1. Verifica se já está na lista carregada (comparando sem diferenciar maiúsculas/minúsculas)
     const currentList = cachedSubfolders || existingSubfolders;
     const foundCached = currentList.find(
       (f) => f.name.trim().toLowerCase() === trimmedCategory.toLowerCase()
@@ -451,7 +440,6 @@ export default function App() {
       return foundCached.id;
     }
 
-    // 2. Consulta diretamente na API do Google Drive dentro da pasta raiz
     const safeName = trimmedCategory.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     const q = encodeURIComponent(
       `mimeType = 'application/vnd.google-apps.folder' and name = '${safeName}' and '${rootId}' in parents and trashed = false`
@@ -468,7 +456,6 @@ export default function App() {
       }
     }
 
-    // 3. Não existe ainda: cria a subpasta dentro da pasta raiz
     const createRes = await googleDriveFetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -490,7 +477,6 @@ export default function App() {
     return created.id;
   };
 
-  // Monta todas as subpastas de todas as categorias dentro da pasta raiz de uma só vez
   const handleSyncAllCategorySubfolders = async (rootIdOverride, silent = false) => {
     const rootId = rootIdOverride || settings.root_folder_id;
     if (!rootId) {
@@ -517,8 +503,8 @@ export default function App() {
       if (!silent || createdCount > 0) {
         showToast(
           createdCount > 0
-            ? `${createdCount} subpasta(s) de categoria criada(s) dentro de "${settings.root_folder_name || 'sua pasta raiz'}"!`
-            : `Todas as ${allCategories.length} subpastas de categorias já estão montadas no seu Google Drive!`
+            ? `${createdCount} subpasta(s) de categoria criada(s) com sucesso!`
+            : `Todas as subpastas de categorias estão montadas no Google Drive!`
         );
       }
     } catch (err) {
@@ -700,7 +686,7 @@ export default function App() {
     setSettings(updated);
     setPendingFolderSelection(null);
     setFolderPickerOpen(false);
-    showToast(`Pasta raiz "${folderName}" vinculada! Montando subpastas de categorias no Drive...`);
+    showToast(`Pasta raiz "${folderName}" vinculada! Montando subpastas...`);
 
     await handleSyncAllCategorySubfolders(folderId, false);
   };
@@ -726,9 +712,6 @@ export default function App() {
     }
   };
 
-  // ============================================================================
-  // UPLOAD DIRETO PARA A SUBPASTA DA CATEGORIA NO GOOGLE DRIVE
-  // ============================================================================
   const handleUploadNewModel = async (e) => {
     e.preventDefault();
     if (!settings.root_folder_id) {
@@ -754,12 +737,12 @@ export default function App() {
     try {
       setUploadStep(
         settings.organize_by_subfolders
-          ? `Garantindo subpasta "${uploadForm.category}" dentro de "${settings.root_folder_name}"...`
+          ? `Garantindo subpasta "${uploadForm.category}" no Google Drive...`
           : 'Verificando pasta raiz no Google Drive...'
       );
       targetFolderId = await getTargetUploadFolderId(uploadForm.category);
 
-      setUploadStep(`Enviando arquivo ZIP para a subpasta "${uploadForm.category}" no Google Drive...`);
+      setUploadStep(`Enviando arquivo ZIP para o Google Drive...`);
       const metadata = {
         name: uploadForm.zipFile.name,
         parents: [targetFolderId],
@@ -780,18 +763,17 @@ export default function App() {
 
       if (!driveRes.ok) {
         const errBody = await driveRes.json().catch(() => ({}));
-        throw new Error(errBody?.error?.message || `Erro ${driveRes.status} ao enviar arquivo para o Google Drive.`);
+        throw new Error(errBody?.error?.message || `Erro ao enviar arquivo para o Google Drive.`);
       }
 
       uploadedDriveData = await driveRes.json();
-
       await completeDatabaseRegistration(uploadedDriveData, targetFolderId, uploadForm);
 
       setUploadForm({
         name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFile: null
       });
       setPendingRecovery(null);
-      showToast(`Modelo salvo na subpasta "${uploadForm.category}" do Drive e catalogado!`);
+      showToast(`Modelo enviado para o Drive e catalogado com sucesso!`);
       setActiveTab('catalogo');
       loadUserData();
     } catch (err) {
@@ -934,7 +916,7 @@ export default function App() {
     try {
       const targetFolderId = importingFile.detectedFolderId || settings.root_folder_id;
       await completeDatabaseRegistration(importingFile, targetFolderId, importForm);
-      showToast(`Arquivo "${importingFile.name}" importado!`);
+      showToast(`Arquivo "${importingFile.name}" importado com sucesso!`);
       setImportingFile(null);
       loadUserData();
     } catch (err) {
@@ -973,19 +955,31 @@ export default function App() {
     }
   };
 
+  // ============================================================================
+  // EDIÇÃO COM SUPORTE A ALTERAÇÃO DE IMAGEM DE REFERÊNCIA
+  // ============================================================================
   const handleSaveEdit = async (e) => {
     e.preventDefault();
     if (!editingModel) return;
     setUploading(true);
     try {
       let imagePath = editingModel.image_path;
+
+      // Se o usuário selecionou uma nova imagem para substituir a anterior:
       if (editingModel.newImageFile) {
         const ext = editingModel.newImageFile.name.split('.').pop();
-        const fileName = `${session.user.id}/${Date.now()}.${ext}`;
+        const fileName = `${session.user.id}/${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
+
         const { error: upErr } = await supabase.storage
           .from('stl-images')
           .upload(fileName, editingModel.newImageFile);
         if (upErr) throw upErr;
+
+        // Se já existia uma imagem antiga, remove do bucket privado para não acumular lixo
+        if (editingModel.image_path) {
+          await supabase.storage.from('stl-images').remove([editingModel.image_path]);
+        }
+
         imagePath = fileName;
       }
 
@@ -1007,7 +1001,7 @@ export default function App() {
         .eq('id', editingModel.id);
 
       if (error) throw error;
-      showToast('Cadastro atualizado com sucesso!');
+      showToast('Cadastro e imagem atualizados com sucesso!');
       setEditingModel(null);
       setSelectedModel(null);
       loadUserData();
@@ -1042,7 +1036,7 @@ export default function App() {
             const errData = await trashRes.json().catch(() => ({}));
             throw new Error(
               errData?.error?.message ||
-                'O escopo drive.file permite excluir pelo app apenas arquivos enviados pelo próprio app.'
+              'O escopo drive.file permite excluir pelo app apenas arquivos enviados pelo próprio app.'
             );
           }
         }
@@ -1264,9 +1258,8 @@ export default function App() {
           <nav className="flex items-center gap-1 sm:gap-2 overflow-x-auto py-1">
             <button
               onClick={() => setActiveTab('catalogo')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-                activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-              }`}
+              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+                }`}
             >
               <Box className="w-4 h-4" />
               <span>Catálogo ({models.length})</span>
@@ -1274,9 +1267,8 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('upload')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-                activeTab === 'upload' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-              }`}
+              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'upload' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+                }`}
             >
               <Upload className="w-4 h-4" />
               <span>Enviar</span>
@@ -1284,9 +1276,8 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('importar')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-                activeTab === 'importar' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-              }`}
+              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'importar' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+                }`}
             >
               <FolderDown className="w-4 h-4" />
               <span>Importar</span>
@@ -1294,9 +1285,8 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('configuracoes')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-                activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-              }`}
+              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
+                }`}
             >
               <Settings className="w-4 h-4" />
               <span className="hidden lg:inline">Configurações</span>
@@ -1359,9 +1349,8 @@ export default function App() {
                   <button
                     key={cat}
                     onClick={() => setSelectedCategory(cat)}
-                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer ${
-                      selectedCategory === cat ? 'bg-[#e4e0d7] text-[#000000]' : 'bg-[#0a0a0a] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522]'
-                    }`}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer ${selectedCategory === cat ? 'bg-[#e4e0d7] text-[#000000]' : 'bg-[#0a0a0a] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522]'
+                      }`}
                   >
                     {cat}
                   </button>
@@ -1896,7 +1885,7 @@ export default function App() {
         )}
       </main>
 
-      {/* Modais */}
+      {/* MODAL DE DETALHES */}
       {selectedModel && (
         <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
           <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
@@ -1963,11 +1952,12 @@ export default function App() {
         </div>
       )}
 
+      {/* MODAL DE EDIÇÃO (COM TROCA DE IMAGEM) */}
       {editingModel && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
-          <form onSubmit={handleSaveEdit} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4">
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 overflow-y-auto">
+          <form onSubmit={handleSaveEdit} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4 my-auto max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center">
-              <h3 className="font-bold text-[#e4e0d7]">Editar Cadastro</h3>
+              <h3 className="font-bold text-[#e4e0d7]">Editar Cadastro e Imagem</h3>
               <button type="button" onClick={() => setEditingModel(null)}><X className="w-5 h-5 text-[#8c877e]" /></button>
             </div>
             <div>
@@ -1979,9 +1969,29 @@ export default function App() {
               <label className="block text-xs text-[#a39e93] mb-1">Descrição</label>
               <textarea rows={2} value={editingModel.description} onChange={(e) => setEditingModel({ ...editingModel, description: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
             </div>
+            <div>
+              <label className="block text-xs text-[#a39e93] mb-1">Tags (separadas por vírgula)</label>
+              <input type="text" value={editingModel.tagsInput} onChange={(e) => setEditingModel({ ...editingModel, tagsInput: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+            </div>
+            <div>
+              <label className="block text-xs text-[#a39e93] mb-1">Observações</label>
+              <input type="text" value={editingModel.notes} onChange={(e) => setEditingModel({ ...editingModel, notes: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-[#c89d66] mb-1">Alterar Imagem de Referência (Opcional)</label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => setEditingModel({ ...editingModel, newImageFile: e.target.files?.[0] || null })}
+                className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]"
+              />
+              {editingModel.newImageFile && <p className="text-[11px] text-[#70a37f] mt-1">Nova imagem: {editingModel.newImageFile.name}</p>}
+            </div>
             <div className="flex justify-end gap-2 pt-2">
               <button type="button" onClick={() => setEditingModel(null)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
-              <button type="submit" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">Salvar</button>
+              <button type="submit" disabled={uploading} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">
+                {uploading ? 'Salvando...' : 'Salvar Alterações'}
+              </button>
             </div>
           </form>
         </div>
@@ -2005,21 +2015,45 @@ export default function App() {
         </div>
       )}
 
+      {/* MODAL DE IMPORTAÇÃO (COM SUPORTE A IMAGEM DE REFERÊNCIA) */}
       {importingFile && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
-          <form onSubmit={handleConfirmImport} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4">
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 overflow-y-auto">
+          <form onSubmit={handleConfirmImport} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4 my-auto max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center">
               <h3 className="font-bold text-[#e4e0d7]">Importar ZIP do Drive</h3>
               <button type="button" onClick={() => setImportingFile(null)}><X className="w-5 h-5 text-[#8c877e]" /></button>
+            </div>
+            <div className="p-2.5 rounded-xl bg-[#000000] border border-[#262522] text-xs text-[#a39e93] truncate">
+              Arquivo: <strong className="text-[#e4e0d7]">{importingFile.name}</strong>
             </div>
             <div>
               <label className="block text-xs text-[#a39e93] mb-1">Nome do Modelo</label>
               <input type="text" required value={importForm.name} onChange={(e) => setImportForm({ ...importForm, name: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
             </div>
             {renderCategorySelector(importForm.category, (val) => setImportForm({ ...importForm, category: val }), 'import')}
+            <div>
+              <label className="block text-xs text-[#a39e93] mb-1">Descrição</label>
+              <textarea rows={2} value={importForm.description} onChange={(e) => setImportForm({ ...importForm, description: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+            </div>
+            <div>
+              <label className="block text-xs text-[#a39e93] mb-1">Tags (separadas por vírgula)</label>
+              <input type="text" value={importForm.tags} onChange={(e) => setImportForm({ ...importForm, tags: e.target.value })} placeholder="rpg, stl" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-[#c89d66] mb-1">Imagem de Referência (Opcional)</label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => setImportForm({ ...importForm, imageFile: e.target.files?.[0] || null })}
+                className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]"
+              />
+              {importForm.imageFile && <p className="text-[11px] text-[#70a37f] mt-1">Selecionada: {importForm.imageFile.name}</p>}
+            </div>
             <div className="flex justify-end gap-2 pt-2">
               <button type="button" onClick={() => setImportingFile(null)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
-              <button type="submit" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">Importar</button>
+              <button type="submit" disabled={uploading} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">
+                {uploading ? 'Importando...' : 'Confirmar Importação'}
+              </button>
             </div>
           </form>
         </div>
