@@ -60,6 +60,7 @@ export default function App() {
   const [googleUserEmail, setGoogleUserEmail] = useState(() => localStorage.getItem('stl_google_email') || '');
   const [googleConnected, setGoogleConnected] = useState(false);
   const tokenClientRef = useRef(null);
+  const autoSyncedRef = useRef(false);
 
   const [settings, setSettings] = useState({
     root_folder_id: '',
@@ -68,6 +69,10 @@ export default function App() {
     max_upload_size_mb: 150,
     custom_categories: []
   });
+
+  // Lista real de subpastas existentes dentro da pasta raiz no Google Drive
+  const [existingSubfolders, setExistingSubfolders] = useState([]);
+  const [loadingSubfolders, setLoadingSubfolders] = useState(false);
 
   const [addingCategoryContext, setAddingCategoryContext] = useState(null);
   const [newCategoryName, setNewCategoryName] = useState('');
@@ -133,7 +138,7 @@ export default function App() {
   }, [settings.custom_categories, models]);
 
   // ============================================================================
-  // GERENCIADOR INTELIGENTE DE TOKEN GOOGLE (Evita erro 401 ao salvar/excluir)
+  // GERENCIADOR INTELIGENTE DE TOKEN GOOGLE
   // ============================================================================
   const saveTokenData = (token, expiresInSec = 3500) => {
     const expiryTime = Date.now() + expiresInSec * 1000;
@@ -143,17 +148,14 @@ export default function App() {
     localStorage.setItem('stl_google_token_expiry', String(expiryTime));
   };
 
-  // Verifica se o token ainda é válido; se tiver expirado, solicita renovação silenciosa na hora
   const ensureValidGoogleToken = async () => {
     const storedToken = googleToken || localStorage.getItem('stl_google_access_token');
     const expiry = Number(localStorage.getItem('stl_google_token_expiry') || 0);
 
-    // Se o token existe e ainda faltam mais de 2 minutos para expirar, valida rápido
     if (storedToken && Date.now() < expiry - 120000) {
       return storedToken;
     }
 
-    // Se expirou ou está prestes a expirar, renova via Google Identity Services sem perder a ação atual
     if (!window.google?.accounts?.oauth2 || !GOOGLE_CLIENT_ID) {
       throw new Error('Serviço de autenticação do Google não disponível. Recarregue a página.');
     }
@@ -162,7 +164,7 @@ export default function App() {
       const client = window.google.accounts.oauth2.initTokenClient({
         client_id: GOOGLE_CLIENT_ID,
         scope: GOOGLE_SCOPES,
-        prompt: '', // Renovação silenciosa sem forçar tela de consentimento se já autorizado
+        prompt: '',
         hint: googleUserEmail || localStorage.getItem('stl_google_email') || undefined,
         callback: (response) => {
           if (response.error) {
@@ -178,7 +180,6 @@ export default function App() {
     });
   };
 
-  // Wrapper de requisições para a API do Google Drive v3 com auto-retry em caso de 401
   const googleDriveFetch = async (url, options = {}) => {
     let token = await ensureValidGoogleToken();
     let res = await fetch(url, {
@@ -189,7 +190,6 @@ export default function App() {
       }
     });
 
-    // Se mesmo assim o Google retornar 401 (token invalidado), força a renovação imediata e tenta de novo
     if (res.status === 401) {
       localStorage.setItem('stl_google_token_expiry', '0');
       token = await ensureValidGoogleToken();
@@ -205,7 +205,6 @@ export default function App() {
     return res;
   };
 
-  // Carrega script oficial do Google Identity Services
   useEffect(() => {
     const script = document.createElement('script');
     script.src = 'https://accounts.google.com/gsi/client';
@@ -252,10 +251,22 @@ export default function App() {
         const dbCats = Array.isArray(cfg.custom_categories) ? cfg.custom_categories : [];
         const mergedCats = Array.from(new Set([...dbCats, ...localCachedCats]));
 
+        // Migração automática para garantir que organize_by_subfolders fique true se nunca foi forçado manualmente
+        const migrationDone = localStorage.getItem(`stl_subfolders_migrated_${session.user.id}`);
+        let shouldUseSubfolders = cfg.organize_by_subfolders ?? true;
+        if (!migrationDone) {
+          shouldUseSubfolders = true;
+          localStorage.setItem(`stl_subfolders_migrated_${session.user.id}`, 'true');
+          await supabase
+            .from('user_settings')
+            .update({ organize_by_subfolders: true })
+            .eq('user_id', session.user.id);
+        }
+
         setSettings({
           root_folder_id: cfg.root_folder_id || '',
           root_folder_name: cfg.root_folder_name || '',
-          organize_by_subfolders: cfg.organize_by_subfolders ?? true,
+          organize_by_subfolders: shouldUseSubfolders,
           max_upload_size_mb: cfg.max_upload_size_mb || 150,
           custom_categories: mergedCats
         });
@@ -267,11 +278,10 @@ export default function App() {
           setGoogleConnected(true);
           fetchUserInfo(cachedToken);
         } else if (cfg.google_refresh_token) {
-          // Marca como conectado para permitir renovação automática sob demanda
           setGoogleConnected(true);
         }
       } else if (localCachedCats.length > 0) {
-        setSettings((prev) => ({ ...prev, custom_categories: localCachedCats }));
+        setSettings((prev) => ({ ...prev, custom_categories: localCachedCats, organize_by_subfolders: true }));
       }
 
       const { data: modelList, error: modelErr } = await supabase
@@ -301,6 +311,16 @@ export default function App() {
       setLoadingData(false);
     }
   };
+
+  // Assim que tiver pasta raiz e Google conectado, lista e monta automaticamente as subpastas que faltarem
+  useEffect(() => {
+    if (googleConnected && settings.root_folder_id && settings.organize_by_subfolders && !autoSyncedRef.current) {
+      autoSyncedRef.current = true;
+      handleSyncAllCategorySubfolders(settings.root_folder_id, true);
+    } else if (googleConnected && settings.root_folder_id) {
+      fetchRootSubfolders(settings.root_folder_id);
+    }
+  }, [googleConnected, settings.root_folder_id, settings.organize_by_subfolders]);
 
   const fetchUserInfo = async (token) => {
     try {
@@ -360,6 +380,8 @@ export default function App() {
         showToast('Conta Google conectada com sucesso!');
         if (!settings.root_folder_id) {
           openFolderPicker();
+        } else if (settings.organize_by_subfolders) {
+          handleSyncAllCategorySubfolders(settings.root_folder_id, false);
         }
       }
     });
@@ -389,13 +411,47 @@ export default function App() {
   };
 
   // ============================================================================
-  // CRIAÇÃO E BUSCA DE SUBPASTAS DE CATEGORIA DENTRO DA PASTA RAIZ NO DRIVE
+  // MONTAGEM E SINCRONIZAÇÃO DE SUBPASTAS DE CATEGORIAS DENTRO DA PASTA RAIZ
   // ============================================================================
-  const ensureCategorySubfolderInDrive = async (categoryName, rootIdOverride) => {
+  const fetchRootSubfolders = async (rootIdOverride) => {
+    const rootId = rootIdOverride || settings.root_folder_id;
+    if (!rootId) return [];
+    setLoadingSubfolders(true);
+    try {
+      const q = encodeURIComponent(
+        `'${rootId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
+      );
+      const res = await googleDriveFetch(
+        `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=100`
+      );
+      if (!res.ok) return [];
+      const data = await res.json();
+      const list = data.files || [];
+      setExistingSubfolders(list);
+      return list;
+    } catch {
+      return [];
+    } finally {
+      setLoadingSubfolders(false);
+    }
+  };
+
+  const ensureCategorySubfolderInDrive = async (categoryName, rootIdOverride, cachedSubfolders = null) => {
     const rootId = rootIdOverride || settings.root_folder_id;
     if (!rootId || !categoryName) return rootId;
 
     const trimmedCategory = categoryName.trim();
+
+    // 1. Verifica se já está na lista carregada (comparando sem diferenciar maiúsculas/minúsculas)
+    const currentList = cachedSubfolders || existingSubfolders;
+    const foundCached = currentList.find(
+      (f) => f.name.trim().toLowerCase() === trimmedCategory.toLowerCase()
+    );
+    if (foundCached?.id) {
+      return foundCached.id;
+    }
+
+    // 2. Consulta diretamente na API do Google Drive dentro da pasta raiz
     const safeName = trimmedCategory.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     const q = encodeURIComponent(
       `mimeType = 'application/vnd.google-apps.folder' and name = '${safeName}' and '${rootId}' in parents and trashed = false`
@@ -412,6 +468,7 @@ export default function App() {
       }
     }
 
+    // 3. Não existe ainda: cria a subpasta dentro da pasta raiz
     const createRes = await googleDriveFetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -429,24 +486,43 @@ export default function App() {
       );
     }
     const created = await createRes.json();
+    setExistingSubfolders((prev) => [...prev, created]);
     return created.id;
   };
 
-  const handleSyncAllCategorySubfolders = async (rootIdOverride) => {
+  // Monta todas as subpastas de todas as categorias dentro da pasta raiz de uma só vez
+  const handleSyncAllCategorySubfolders = async (rootIdOverride, silent = false) => {
     const rootId = rootIdOverride || settings.root_folder_id;
     if (!rootId) {
-      showToast('Selecione uma pasta raiz primeiro.', 'error');
+      if (!silent) showToast('Selecione uma pasta raiz primeiro.', 'error');
       return;
     }
 
     setSyncingCategoryFolders(true);
     try {
+      const currentSubs = await fetchRootSubfolders(rootId);
+      let createdCount = 0;
+
       for (const cat of allCategories) {
-        await ensureCategorySubfolderInDrive(cat, rootId);
+        const exists = currentSubs.some(
+          (f) => f.name.trim().toLowerCase() === cat.trim().toLowerCase()
+        );
+        if (!exists) {
+          await ensureCategorySubfolderInDrive(cat, rootId, currentSubs);
+          createdCount++;
+        }
       }
-      showToast(`Todas as ${allCategories.length} subpastas de categorias foram verificadas/criadas na pasta raiz!`);
+
+      await fetchRootSubfolders(rootId);
+      if (!silent || createdCount > 0) {
+        showToast(
+          createdCount > 0
+            ? `${createdCount} subpasta(s) de categoria criada(s) dentro de "${settings.root_folder_name || 'sua pasta raiz'}"!`
+            : `Todas as ${allCategories.length} subpastas de categorias já estão montadas no seu Google Drive!`
+        );
+      }
     } catch (err) {
-      showToast(err.message, 'error');
+      if (!silent) showToast(`Erro ao montar subpastas: ${err.message}`, 'error');
     } finally {
       setSyncingCategoryFolders(false);
     }
@@ -456,7 +532,8 @@ export default function App() {
     if (!settings.organize_by_subfolders || !categoryName) {
       return settings.root_folder_id;
     }
-    return await ensureCategorySubfolderInDrive(categoryName);
+    const subId = await ensureCategorySubfolderInDrive(categoryName, settings.root_folder_id);
+    return subId || settings.root_folder_id;
   };
 
   const handleAddPermanentCategory = async (targetContext) => {
@@ -494,6 +571,7 @@ export default function App() {
     if (settings.organize_by_subfolders && settings.root_folder_id && googleConnected) {
       try {
         await ensureCategorySubfolderInDrive(trimmed);
+        await fetchRootSubfolders(settings.root_folder_id);
       } catch (err) {
         console.warn('Erro ao criar subpasta automática:', err);
       }
@@ -510,7 +588,7 @@ export default function App() {
     setNewCategoryName('');
     setAddingCategoryContext(null);
     setSavingCategory(false);
-    showToast(`Categoria "${trimmed}" salva com sucesso!`);
+    showToast(`Categoria "${trimmed}" salva e subpasta montada no Google Drive!`);
   };
 
   const handleRemoveCustomCategory = async (catToRemove) => {
@@ -601,7 +679,8 @@ export default function App() {
     const updated = {
       ...settings,
       root_folder_id: folderId,
-      root_folder_name: folderName
+      root_folder_name: folderName,
+      organize_by_subfolders: true
     };
     const { error } = await supabase
       .from('user_settings')
@@ -609,7 +688,7 @@ export default function App() {
         user_id: session.user.id,
         root_folder_id: folderId,
         root_folder_name: folderName,
-        organize_by_subfolders: updated.organize_by_subfolders,
+        organize_by_subfolders: true,
         max_upload_size_mb: updated.max_upload_size_mb,
         updated_at: new Date().toISOString()
       });
@@ -621,11 +700,9 @@ export default function App() {
     setSettings(updated);
     setPendingFolderSelection(null);
     setFolderPickerOpen(false);
-    showToast(`Pasta raiz vinculada: ${folderName}. Sincronizando subpastas...`);
+    showToast(`Pasta raiz "${folderName}" vinculada! Montando subpastas de categorias no Drive...`);
 
-    if (updated.organize_by_subfolders) {
-      await handleSyncAllCategorySubfolders(folderId);
-    }
+    await handleSyncAllCategorySubfolders(folderId, false);
   };
 
   const handleSaveGeneralSettings = async (newPartial) => {
@@ -645,12 +722,12 @@ export default function App() {
     showToast('Configurações atualizadas!');
 
     if (newPartial.organize_by_subfolders === true && merged.root_folder_id) {
-      await handleSyncAllCategorySubfolders(merged.root_folder_id);
+      await handleSyncAllCategorySubfolders(merged.root_folder_id, false);
     }
   };
 
   // ============================================================================
-  // UPLOAD DIRETO PARA O GOOGLE DRIVE (COM AUTO-RENOVAÇÃO DE TOKEN)
+  // UPLOAD DIRETO PARA A SUBPASTA DA CATEGORIA NO GOOGLE DRIVE
   // ============================================================================
   const handleUploadNewModel = async (e) => {
     e.preventDefault();
@@ -677,12 +754,12 @@ export default function App() {
     try {
       setUploadStep(
         settings.organize_by_subfolders
-          ? `Verificando/criando subpasta "${uploadForm.category}" no Google Drive...`
+          ? `Garantindo subpasta "${uploadForm.category}" dentro de "${settings.root_folder_name}"...`
           : 'Verificando pasta raiz no Google Drive...'
       );
       targetFolderId = await getTargetUploadFolderId(uploadForm.category);
 
-      setUploadStep(`Enviando arquivo ZIP para o Google Drive...`);
+      setUploadStep(`Enviando arquivo ZIP para a subpasta "${uploadForm.category}" no Google Drive...`);
       const metadata = {
         name: uploadForm.zipFile.name,
         parents: [targetFolderId],
@@ -714,7 +791,7 @@ export default function App() {
         name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFile: null
       });
       setPendingRecovery(null);
-      showToast(`Modelo enviado para o Drive e catalogado com sucesso!`);
+      showToast(`Modelo salvo na subpasta "${uploadForm.category}" do Drive e catalogado!`);
       setActiveTab('catalogo');
       loadUserData();
     } catch (err) {
@@ -796,19 +873,11 @@ export default function App() {
     }
   };
 
-  // Busca arquivos ZIP tanto na pasta raiz quanto dentro das subpastas de categorias
   const fetchExistingDriveZips = async () => {
     if (!settings.root_folder_id) return;
     setLoadingDriveZips(true);
     try {
-      const subFoldersQ = encodeURIComponent(
-        `'${settings.root_folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
-      );
-      const subRes = await googleDriveFetch(
-        `https://www.googleapis.com/drive/v3/files?q=${subFoldersQ}&fields=files(id,name)&pageSize=100`
-      );
-      const subData = subRes.ok ? await subRes.json() : { files: [] };
-      const subFolders = subData.files || [];
+      const subFolders = await fetchRootSubfolders(settings.root_folder_id);
 
       const folderMap = { [settings.root_folder_id]: 'Pasta Raiz' };
       subFolders.forEach((sf) => {
@@ -949,21 +1018,16 @@ export default function App() {
     }
   };
 
-  // ============================================================================
-  // EXCLUSÃO CORRIGIDA (Trata renovação de token, DELETE e Fallback de Lixeira)
-  // ============================================================================
   const handleDeleteModel = async () => {
     if (!deleteConfirmModel) return;
     setUploading(true);
     try {
       if (deleteAlsoFromDrive) {
-        // 1. Tenta excluir permanentemente via API v3
         let driveDel = await googleDriveFetch(
           `https://www.googleapis.com/drive/v3/files/${deleteConfirmModel.drive_file_id}`,
           { method: 'DELETE' }
         );
 
-        // 2. Se falhar por restrição de escopo (ex: 403 em arquivo antigo), tenta mover para a lixeira (trashed = true)
         if (!driveDel.ok && driveDel.status !== 404) {
           const trashRes = await googleDriveFetch(
             `https://www.googleapis.com/drive/v3/files/${deleteConfirmModel.drive_file_id}`,
@@ -978,7 +1042,7 @@ export default function App() {
             const errData = await trashRes.json().catch(() => ({}));
             throw new Error(
               errData?.error?.message ||
-                'O escopo drive.file permite excluir pelo app apenas arquivos enviados pelo próprio app. Desmarque a caixa para remover do catálogo e apague o ZIP manualmente no Drive.'
+                'O escopo drive.file permite excluir pelo app apenas arquivos enviados pelo próprio app.'
             );
           }
         }
@@ -1640,7 +1704,7 @@ export default function App() {
                   <span className="font-semibold text-[#e4e0d7] break-all">{settings.root_folder_name || 'Nenhuma'}</span>
                 </div>
                 <div className="flex flex-col sm:flex-row sm:justify-between gap-1">
-                  <span className="text-[#8c877e]">ID da Pasta:</span>
+                  <span className="text-[#8c877e]">ID da Pasta Raiz:</span>
                   <span className="font-mono text-[#c89d66] break-all">{settings.root_folder_id || '—'}</span>
                 </div>
               </div>
@@ -1661,15 +1725,15 @@ export default function App() {
                       Selecionar Outra Pasta Raiz
                     </button>
                     {settings.root_folder_id && (
-                      <button
-                        type="button"
-                        disabled={syncingCategoryFolders}
-                        onClick={() => handleSyncAllCategorySubfolders()}
-                        className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center gap-2 cursor-pointer"
+                      <a
+                        href={`https://drive.google.com/drive/folders/${settings.root_folder_id}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold inline-flex items-center gap-1.5"
                       >
-                        <FolderPlus className={`w-4 h-4 text-[#c89d66] ${syncingCategoryFolders ? 'animate-spin' : ''}`} />
-                        <span>{syncingCategoryFolders ? 'Criando Subpastas...' : 'Sincronizar Subpastas de Categorias no Drive'}</span>
-                      </button>
+                        <span>Abrir Pasta Raiz no Drive</span>
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </a>
                     )}
                     <button
                       onClick={handleDisconnectGoogle}
@@ -1682,14 +1746,33 @@ export default function App() {
               </div>
             </div>
 
-            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-5">
-              <h3 className="font-bold text-[#e4e0d7] text-base">Organização de Pastas por Categoria</h3>
-
-              <div className="flex items-center justify-between gap-4">
+            {/* PAINEL VISUAL DE SUBPASTAS NO GOOGLE DRIVE */}
+            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
-                  <p className="text-sm font-medium text-[#e4e0d7]">Criar e organizar ZIPs em subpastas por categoria</p>
+                  <h3 className="font-bold text-[#e4e0d7] text-base">Subpastas por Categoria no Google Drive</h3>
                   <p className="text-xs text-[#8c877e]">
-                    Quando ativo, cada categoria terá sua própria pasta dentro da pasta raiz do Google Drive.
+                    Pastas criadas automaticamente dentro de <strong>{settings.root_folder_name || 'sua pasta raiz'}</strong>
+                  </p>
+                </div>
+                {settings.root_folder_id && (
+                  <button
+                    type="button"
+                    disabled={syncingCategoryFolders}
+                    onClick={() => handleSyncAllCategorySubfolders(settings.root_folder_id, false)}
+                    className="px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer shrink-0"
+                  >
+                    <FolderPlus className={`w-4 h-4 ${syncingCategoryFolders ? 'animate-spin' : ''}`} />
+                    <span>{syncingCategoryFolders ? 'Montando Subpastas...' : 'Montar Todas as Subpastas Agora'}</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between gap-4 p-3.5 rounded-xl bg-[#000000] border border-[#262522]">
+                <div>
+                  <p className="text-xs sm:text-sm font-semibold text-[#e4e0d7]">Salvar novos ZIPs dentro das subpastas de categoria</p>
+                  <p className="text-[11px] text-[#8c877e]">
+                    Quando marcado, cada upload vai para a pasta da sua respectiva categoria.
                   </p>
                 </div>
                 <input
@@ -1698,6 +1781,43 @@ export default function App() {
                   onChange={(e) => handleSaveGeneralSettings({ organize_by_subfolders: e.target.checked })}
                   className="w-5 h-5 accent-[#e4e0d7] cursor-pointer shrink-0"
                 />
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs text-[#8c877e]">
+                  <span>Subpastas detectadas na pasta raiz ({existingSubfolders.length}):</span>
+                  <button
+                    type="button"
+                    onClick={() => fetchRootSubfolders(settings.root_folder_id)}
+                    className="text-[#e4e0d7] hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${loadingSubfolders ? 'animate-spin' : ''}`} /> Atualizar
+                  </button>
+                </div>
+
+                {existingSubfolders.length === 0 ? (
+                  <div className="p-4 rounded-xl bg-[#000000] border border-[#262522] text-xs text-[#8c877e] text-center">
+                    Nenhuma subpasta montada ainda. Clique no botão <strong>"Montar Todas as Subpastas Agora"</strong> acima para criá-las no seu Google Drive!
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {existingSubfolders.map((sf) => (
+                      <a
+                        key={sf.id}
+                        href={`https://drive.google.com/drive/folders/${sf.id}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="p-2.5 rounded-xl bg-[#000000] hover:bg-[#141413] border border-[#262522] flex items-center justify-between text-xs transition"
+                      >
+                        <div className="flex items-center gap-2 truncate">
+                          <Folder className="w-4 h-4 text-[#c89d66] shrink-0" />
+                          <span className="text-[#e4e0d7] font-medium truncate">{sf.name}</span>
+                        </div>
+                        <ExternalLink className="w-3.5 h-3.5 text-[#8c877e] shrink-0" />
+                      </a>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
 
