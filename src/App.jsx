@@ -4,7 +4,7 @@ import {
   Box, Upload, FolderDown, Settings, Search, Plus, ExternalLink,
   Trash2, Edit3, Eye, CheckCircle2, AlertTriangle, Folder,
   HardDrive, ShieldCheck, RefreshCw, X, Check, FileArchive,
-  LogOut, FolderPlus, Tag
+  LogOut, FolderPlus, Tag, Calculator, Cpu, Layers, Menu
 } from 'lucide-react';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
@@ -62,12 +62,19 @@ export default function App() {
   const tokenClientRef = useRef(null);
   const autoSyncedRef = useRef(false);
 
+  // Estado do Menu Responsivo (Hambúrguer)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
   const [settings, setSettings] = useState({
     root_folder_id: '',
     root_folder_name: '',
     organize_by_subfolders: true,
     max_upload_size_mb: 150,
-    custom_categories: []
+    custom_categories: [],
+    energy_cost_kwh: 0.95,
+    default_failure_rate: 5,
+    default_post_processing_pct: 15,
+    labor_hourly_rate: 25.00
   });
 
   const [existingSubfolders, setExistingSubfolders] = useState([]);
@@ -77,6 +84,21 @@ export default function App() {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [savingCategory, setSavingCategory] = useState(false);
   const [syncingCategoryFolders, setSyncingCategoryFolders] = useState(false);
+
+  // Dados da Calculadora
+  const [materials, setMaterials] = useState([]);
+  const [printers, setPrinters] = useState([]);
+  const [calcForm, setCalcForm] = useState({
+    printerId: '',
+    materialId: '',
+    weightGrams: 100,
+    printHours: 5,
+    failureRate: 5,
+    washed: true,
+    painted: false,
+    laborHours: 0.5,
+    profitMarginPct: 100
+  });
 
   const [models, setModels] = useState([]);
   const [signedUrls, setSignedUrls] = useState({});
@@ -100,30 +122,12 @@ export default function App() {
   const [newFolderName, setNewFolderName] = useState('Biblioteca STL');
   const [pendingFolderSelection, setPendingFolderSelection] = useState(null);
 
-  const [uploadForm, setUploadForm] = useState({
-    name: '',
-    description: '',
-    category: 'Geral',
-    tags: '',
-    notes: '',
-    zipFile: null,
-    imageFile: null
-  });
-  const [uploading, setUploading] = useState(false);
-  const [uploadStep, setUploadStep] = useState('');
-  const [pendingRecovery, setPendingRecovery] = useState(null);
+  // Estados de Cadastro na Calculadora (Modais internos)
+  const [newMaterialModal, setNewMaterialModal] = useState(false);
+  const [matForm, setMatForm] = useState({ type: 'Filamento', name: '', color: 'Preto', price_per_unit: 80 });
 
-  const [driveZipFiles, setDriveZipFiles] = useState([]);
-  const [loadingDriveZips, setLoadingDriveZips] = useState(false);
-  const [importingFile, setImportingFile] = useState(null);
-  const [importForm, setImportForm] = useState({
-    name: '',
-    description: '',
-    category: 'Geral',
-    tags: '',
-    notes: '',
-    imageFile: null
-  });
+  const [newPrinterModal, setNewPrinterModal] = useState(false);
+  const [printForm, setPrintForm] = useState({ name: '', power_watts: 150, printer_value: 2000, lifespan_hours: 5000 });
 
   const showToast = (message, type = 'success') => {
     setToast({ message, type });
@@ -247,24 +251,22 @@ export default function App() {
         const dbCats = Array.isArray(cfg.custom_categories) ? cfg.custom_categories : [];
         const mergedCats = Array.from(new Set([...dbCats, ...localCachedCats]));
 
-        const migrationDone = localStorage.getItem(`stl_subfolders_migrated_${session.user.id}`);
-        let shouldUseSubfolders = cfg.organize_by_subfolders ?? true;
-        if (!migrationDone) {
-          shouldUseSubfolders = true;
-          localStorage.setItem(`stl_subfolders_migrated_${session.user.id}`, 'true');
-          await supabase
-            .from('user_settings')
-            .update({ organize_by_subfolders: true })
-            .eq('user_id', session.user.id);
-        }
-
         setSettings({
           root_folder_id: cfg.root_folder_id || '',
           root_folder_name: cfg.root_folder_name || '',
-          organize_by_subfolders: shouldUseSubfolders,
+          organize_by_subfolders: cfg.organize_by_subfolders ?? true,
           max_upload_size_mb: cfg.max_upload_size_mb || 150,
-          custom_categories: mergedCats
+          custom_categories: mergedCats,
+          energy_cost_kwh: cfg.energy_cost_kwh ?? 0.95,
+          default_failure_rate: cfg.default_failure_rate ?? 5,
+          default_post_processing_pct: cfg.default_post_processing_pct ?? 15,
+          labor_hourly_rate: cfg.labor_hourly_rate ?? 25.00
         });
+
+        setCalcForm((prev) => ({
+          ...prev,
+          failureRate: cfg.default_failure_rate ?? 5
+        }));
 
         const cachedToken = localStorage.getItem('stl_google_access_token');
         const expiry = Number(localStorage.getItem('stl_google_token_expiry') || 0);
@@ -279,13 +281,32 @@ export default function App() {
         setSettings((prev) => ({ ...prev, custom_categories: localCachedCats, organize_by_subfolders: true }));
       }
 
-      const { data: modelList, error: modelErr } = await supabase
+      // Carrega Modelos
+      const { data: modelList } = await supabase
         .from('stl_models')
         .select('*')
         .order('created_at', { ascending: false });
-
-      if (modelErr) throw modelErr;
       setModels(modelList || []);
+
+      // Carrega Materiais
+      const { data: matList } = await supabase
+        .from('stl_materials')
+        .select('*')
+        .order('name');
+      setMaterials(matList || []);
+      if (matList?.length > 0 && !calcForm.materialId) {
+        setCalcForm((prev) => ({ ...prev, materialId: matList[0].id }));
+      }
+
+      // Carrega Impressoras
+      const { data: printList } = await supabase
+        .from('stl_printers')
+        .select('*')
+        .order('name');
+      setPrinters(printList || []);
+      if (printList?.length > 0 && !calcForm.printerId) {
+        setCalcForm((prev) => ({ ...prev, printerId: printList[0].id }));
+      }
 
       const urls = {};
       for (const m of (modelList || [])) {
@@ -374,8 +395,6 @@ export default function App() {
         showToast('Conta Google conectada com sucesso!');
         if (!settings.root_folder_id) {
           openFolderPicker();
-        } else if (settings.organize_by_subfolders) {
-          handleSyncAllCategorySubfolders(settings.root_folder_id, false);
         }
       }
     });
@@ -468,9 +487,7 @@ export default function App() {
 
     if (!createRes.ok) {
       const errBody = await createRes.json().catch(() => ({}));
-      throw new Error(
-        errBody?.error?.message || `Não foi possível criar a subpasta "${trimmedCategory}" no Google Drive.`
-      );
+      throw new Error(errBody?.error?.message || `Não foi possível criar a subpasta "${trimmedCategory}" no Drive.`);
     }
     const created = await createRes.json();
     setExistingSubfolders((prev) => [...prev, created]);
@@ -479,10 +496,7 @@ export default function App() {
 
   const handleSyncAllCategorySubfolders = async (rootIdOverride, silent = false) => {
     const rootId = rootIdOverride || settings.root_folder_id;
-    if (!rootId) {
-      if (!silent) showToast('Selecione uma pasta raiz primeiro.', 'error');
-      return;
-    }
+    if (!rootId) return;
 
     setSyncingCategoryFolders(true);
     try {
@@ -501,11 +515,7 @@ export default function App() {
 
       await fetchRootSubfolders(rootId);
       if (!silent || createdCount > 0) {
-        showToast(
-          createdCount > 0
-            ? `${createdCount} subpasta(s) de categoria criada(s) com sucesso!`
-            : `Todas as subpastas de categorias estão montadas no Google Drive!`
-        );
+        showToast(createdCount > 0 ? `${createdCount} subpasta(s) criada(s)!` : 'Subpastas sincronizadas!');
       }
     } catch (err) {
       if (!silent) showToast(`Erro ao montar subpastas: ${err.message}`, 'error');
@@ -527,7 +537,7 @@ export default function App() {
     if (!trimmed) return;
 
     if (allCategories.some((c) => c.toLowerCase() === trimmed.toLowerCase())) {
-      showToast('Essa categoria já existe na lista!', 'error');
+      showToast('Essa categoria já existe!', 'error');
       return;
     }
 
@@ -559,22 +569,18 @@ export default function App() {
         await ensureCategorySubfolderInDrive(trimmed);
         await fetchRootSubfolders(settings.root_folder_id);
       } catch (err) {
-        console.warn('Erro ao criar subpasta automática:', err);
+        console.warn('Erro subpasta:', err);
       }
     }
 
-    if (targetContext === 'upload') {
-      setUploadForm((prev) => ({ ...prev, category: trimmed }));
-    } else if (targetContext === 'import') {
-      setImportForm((prev) => ({ ...prev, category: trimmed }));
-    } else if (targetContext === 'edit' && editingModel) {
-      setEditingModel((prev) => ({ ...prev, category: trimmed }));
-    }
+    if (targetContext === 'upload') setUploadForm((prev) => ({ ...prev, category: trimmed }));
+    else if (targetContext === 'import') setImportForm((prev) => ({ ...prev, category: trimmed }));
+    else if (targetContext === 'edit' && editingModel) setEditingModel((prev) => ({ ...prev, category: trimmed }));
 
     setNewCategoryName('');
     setAddingCategoryContext(null);
     setSavingCategory(false);
-    showToast(`Categoria "${trimmed}" salva e subpasta montada no Google Drive!`);
+    showToast(`Categoria "${trimmed}" adicionada!`);
   };
 
   const handleRemoveCustomCategory = async (catToRemove) => {
@@ -596,7 +602,7 @@ export default function App() {
           updated_at: new Date().toISOString()
         });
     }
-    showToast(`Categoria "${catToRemove}" removida da lista.`);
+    showToast(`Categoria "${catToRemove}" removida.`);
   };
 
   const handleSupabaseAuth = async (e) => {
@@ -607,7 +613,7 @@ export default function App() {
       if (isSignUp) {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
-        showToast('Conta criada! Verifique seu e-mail ou faça login.');
+        showToast('Conta criada! Verifique seu e-mail.');
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
@@ -627,7 +633,7 @@ export default function App() {
       const res = await googleDriveFetch(
         `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime)&pageSize=50`
       );
-      if (!res.ok) throw new Error('Falha ao listar pastas do Google Drive.');
+      if (!res.ok) throw new Error('Falha ao listar pastas.');
       const data = await res.json();
       setDriveFolders(data.files || []);
     } catch (err) {
@@ -644,12 +650,9 @@ export default function App() {
       const res = await googleDriveFetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: newFolderName.trim(),
-          mimeType: 'application/vnd.google-apps.folder'
-        })
+        body: JSON.stringify({ name: newFolderName.trim(), mimeType: 'application/vnd.google-apps.folder' })
       });
-      if (!res.ok) throw new Error('Não foi possível criar a pasta no Google Drive.');
+      if (!res.ok) throw new Error('Falha ao criar pasta.');
       const created = await res.json();
       await saveRootFolderSetting(created.id, created.name);
       setFolderPickerOpen(false);
@@ -662,32 +665,19 @@ export default function App() {
 
   const saveRootFolderSetting = async (folderId, folderName) => {
     if (!supabase || !session?.user) return;
-    const updated = {
-      ...settings,
+    const updated = { ...settings, root_folder_id: folderId, root_folder_name: folderName, organize_by_subfolders: true };
+    await supabase.from('user_settings').upsert({
+      user_id: session.user.id,
       root_folder_id: folderId,
       root_folder_name: folderName,
-      organize_by_subfolders: true
-    };
-    const { error } = await supabase
-      .from('user_settings')
-      .upsert({
-        user_id: session.user.id,
-        root_folder_id: folderId,
-        root_folder_name: folderName,
-        organize_by_subfolders: true,
-        max_upload_size_mb: updated.max_upload_size_mb,
-        updated_at: new Date().toISOString()
-      });
-
-    if (error) {
-      showToast(`Erro ao salvar pasta raiz: ${error.message}`, 'error');
-      return;
-    }
+      organize_by_subfolders: true,
+      max_upload_size_mb: updated.max_upload_size_mb,
+      updated_at: new Date().toISOString()
+    });
     setSettings(updated);
     setPendingFolderSelection(null);
     setFolderPickerOpen(false);
-    showToast(`Pasta raiz "${folderName}" vinculada! Montando subpastas...`);
-
+    showToast(`Pasta raiz "${folderName}" vinculada!`);
     await handleSyncAllCategorySubfolders(folderId, false);
   };
 
@@ -695,27 +685,142 @@ export default function App() {
     const merged = { ...settings, ...newPartial };
     setSettings(merged);
     if (!supabase || !session?.user) return;
-    await supabase
-      .from('user_settings')
-      .upsert({
-        user_id: session.user.id,
-        root_folder_id: merged.root_folder_id,
-        root_folder_name: merged.root_folder_name,
-        organize_by_subfolders: merged.organize_by_subfolders,
-        max_upload_size_mb: merged.max_upload_size_mb,
-        updated_at: new Date().toISOString()
-      });
-    showToast('Configurações atualizadas!');
-
+    await supabase.from('user_settings').upsert({
+      user_id: session.user.id,
+      root_folder_id: merged.root_folder_id,
+      root_folder_name: merged.root_folder_name,
+      organize_by_subfolders: merged.organize_by_subfolders,
+      max_upload_size_mb: merged.max_upload_size_mb,
+      energy_cost_kwh: merged.energy_cost_kwh,
+      default_failure_rate: merged.default_failure_rate,
+      default_post_processing_pct: merged.default_post_processing_pct,
+      labor_hourly_rate: merged.labor_hourly_rate,
+      updated_at: new Date().toISOString()
+    });
+    showToast('Configurações salvas com sucesso!');
     if (newPartial.organize_by_subfolders === true && merged.root_folder_id) {
       await handleSyncAllCategorySubfolders(merged.root_folder_id, false);
     }
   };
 
+  // Cadastro de Materiais
+  const handleSaveMaterial = async (e) => {
+    e.preventDefault();
+    if (!supabase || !session?.user) return;
+    try {
+      const { error } = await supabase.from('stl_materials').insert({
+        user_id: session.user.id,
+        type: matForm.type,
+        name: matForm.name.trim(),
+        color: matForm.color.trim(),
+        price_per_unit: Number(matForm.price_per_unit)
+      });
+      if (error) throw error;
+      showToast('Material cadastrado com sucesso!');
+      setNewMaterialModal(false);
+      setMatForm({ type: 'Filamento', name: '', color: 'Preto', price_per_unit: 80 });
+      loadUserData();
+    } catch (err) {
+      showToast(`Erro: ${err.message}`, 'error');
+    }
+  };
+
+  const handleDeleteMaterial = async (id) => {
+    if (!supabase) return;
+    await supabase.from('stl_materials').delete().eq('id', id);
+    showToast('Material excluído.');
+    loadUserData();
+  };
+
+  // Cadastro de Impressoras
+  const handleSavePrinter = async (e) => {
+    e.preventDefault();
+    if (!supabase || !session?.user) return;
+    try {
+      const { error } = await supabase.from('stl_printers').insert({
+        user_id: session.user.id,
+        name: printForm.name.trim(),
+        power_watts: Number(printForm.power_watts),
+        printer_value: Number(printForm.printer_value),
+        lifespan_hours: Number(printForm.lifespan_hours)
+      });
+      if (error) throw error;
+      showToast('Impressora cadastrada com sucesso!');
+      setNewPrinterModal(false);
+      setPrintForm({ name: '', power_watts: 150, printer_value: 2000, lifespan_hours: 5000 });
+      loadUserData();
+    } catch (err) {
+      showToast(`Erro: ${err.message}`, 'error');
+    }
+  };
+
+  const handleDeletePrinter = async (id) => {
+    if (!supabase) return;
+    await supabase.from('stl_printers').delete().eq('id', id);
+    showToast('Impressora excluída.');
+    loadUserData();
+  };
+
+  // Lógica da Calculadora de Custos
+  const calculationResults = useMemo(() => {
+    const selectedPrinter = printers.find((p) => p.id === calcForm.printerId);
+    const selectedMaterial = materials.find((m) => m.id === calcForm.materialId);
+
+    const weightG = Number(calcForm.weightGrams) || 0;
+    const hours = Number(calcForm.printHours) || 0;
+    const failurePct = Number(calcForm.failureRate) || 0;
+    const laborH = Number(calcForm.laborHours) || 0;
+    const profitPct = Number(calcForm.profitMarginPct) || 0;
+
+    // 1. Custo de Material (com Taxa de Falha)
+    const pricePerKgOrL = selectedMaterial ? Number(selectedMaterial.price_per_unit) || 0 : 80;
+    const effectiveWeightG = weightG * (1 + failurePct / 100);
+    const materialCost = (effectiveWeightG / 1000) * pricePerKgOrL;
+
+    // 2. Custo de Energia (Watts * Horas / 1000 * R$/kWh)
+    const powerW = selectedPrinter ? Number(selectedPrinter.power_watts) || 150 : 150;
+    const energyKWh = (powerW * hours) / 1000;
+    const energyCost = energyKWh * Number(settings.energy_cost_kwh || 0.95);
+
+    // 3. Depreciação da Impressora
+    const printerVal = selectedPrinter ? Number(selectedPrinter.printer_value) || 0 : 2000;
+    const lifespanH = selectedPrinter ? Number(selectedPrinter.lifespan_hours) || 5000 : 5000;
+    const depreciationPerHour = lifespanH > 0 ? printerVal / lifespanH : 0;
+    const depreciationCost = depreciationPerHour * hours;
+
+    // 4. Pós-Processamento e Insumos Adicionais
+    const subtotalDirect = materialCost + energyCost + depreciationCost;
+    const postProcBasePct = Number(settings.default_post_processing_pct || 15);
+    let postProcCost = subtotalDirect * (postProcBasePct / 100);
+    if (calcForm.washed) postProcCost += 3.00; // Custo estimado de IPA/luvas
+    if (calcForm.painted) postProcCost += 12.00; // Custo estimado de primer/tintas
+
+    // 5. Mão de Obra
+    const laborRate = Number(settings.labor_hourly_rate || 25.00);
+    const laborCost = laborH * laborRate;
+
+    // 6. Totais e Preço Final com Lucro
+    const totalCost = subtotalDirect + postProcCost + laborCost;
+    const suggestedPrice = totalCost * (1 + profitPct / 100);
+    const netProfit = suggestedPrice - totalCost;
+
+    return {
+      materialCost,
+      energyCost,
+      depreciationCost,
+      postProcCost,
+      laborCost,
+      totalCost,
+      suggestedPrice,
+      netProfit,
+      effectiveWeightG
+    };
+  }, [calcForm, printers, materials, settings]);
+
   const handleUploadNewModel = async (e) => {
     e.preventDefault();
     if (!settings.root_folder_id) {
-      showToast('Configure a pasta raiz Biblioteca STL antes de enviar arquivos.', 'error');
+      showToast('Configure a pasta raiz no Google Drive primeiro.', 'error');
       setFolderPickerOpen(true);
       return;
     }
@@ -724,66 +829,38 @@ export default function App() {
       return;
     }
 
-    const maxBytes = (settings.max_upload_size_mb || 150) * 1024 * 1024;
-    if (uploadForm.zipFile.size > maxBytes) {
-      showToast(`O arquivo excede o limite configurado de ${settings.max_upload_size_mb} MB.`, 'error');
-      return;
-    }
-
     setUploading(true);
     let uploadedDriveData = null;
     let targetFolderId = settings.root_folder_id;
 
     try {
-      setUploadStep(
-        settings.organize_by_subfolders
-          ? `Garantindo subpasta "${uploadForm.category}" no Google Drive...`
-          : 'Verificando pasta raiz no Google Drive...'
-      );
+      setUploadStep(`Enviando ZIP para a subpasta "${uploadForm.category}" no Drive...`);
       targetFolderId = await getTargetUploadFolderId(uploadForm.category);
 
-      setUploadStep(`Enviando arquivo ZIP para o Google Drive...`);
-      const metadata = {
-        name: uploadForm.zipFile.name,
-        parents: [targetFolderId],
-        mimeType: 'application/zip'
-      };
-
+      const metadata = { name: uploadForm.zipFile.name, parents: [targetFolderId], mimeType: 'application/zip' };
       const formData = new FormData();
       formData.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
       formData.append('file', uploadForm.zipFile);
 
       const driveRes = await googleDriveFetch(
         'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,size,webViewLink',
-        {
-          method: 'POST',
-          body: formData
-        }
+        { method: 'POST', body: formData }
       );
 
-      if (!driveRes.ok) {
-        const errBody = await driveRes.json().catch(() => ({}));
-        throw new Error(errBody?.error?.message || `Erro ao enviar arquivo para o Google Drive.`);
-      }
-
+      if (!driveRes.ok) throw new Error('Falha no upload para o Google Drive.');
       uploadedDriveData = await driveRes.json();
+
       await completeDatabaseRegistration(uploadedDriveData, targetFolderId, uploadForm);
 
-      setUploadForm({
-        name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFile: null
-      });
+      setUploadForm({ name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFile: null });
       setPendingRecovery(null);
-      showToast(`Modelo enviado para o Drive e catalogado com sucesso!`);
+      showToast('Modelo enviado e catalogado com sucesso!');
       setActiveTab('catalogo');
       loadUserData();
     } catch (err) {
       if (uploadedDriveData?.id) {
-        setPendingRecovery({
-          driveData: uploadedDriveData,
-          folderId: targetFolderId,
-          formSnapshot: { ...uploadForm }
-        });
-        showToast('O ZIP foi enviado ao Drive, mas houve falha ao salvar no banco. Use o botão de recuperação abaixo!', 'error');
+        setPendingRecovery({ driveData: uploadedDriveData, folderId: targetFolderId, formSnapshot: { ...uploadForm } });
+        showToast('O ZIP foi enviado, mas falhou ao salvar metadados. Use o botão de recuperação!', 'error');
       } else {
         showToast(err.message, 'error');
       }
@@ -795,24 +872,16 @@ export default function App() {
 
   const completeDatabaseRegistration = async (driveData, folderId, formValues) => {
     let imagePath = null;
-
     if (formValues.imageFile) {
-      setUploadStep('Enviando imagem de referência ao bucket privado do Supabase...');
+      setUploadStep('Enviando imagem para o Supabase...');
       const ext = formValues.imageFile.name.split('.').pop();
-      const fileName = `${session.user.id}/${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
-      const { error: storageErr } = await supabase.storage
-        .from('stl-images')
-        .upload(fileName, formValues.imageFile, { upsert: false });
-
-      if (storageErr) throw new Error(`Falha ao salvar imagem no Supabase: ${storageErr.message}`);
+      const fileName = `${session.user.id}/${Date.now()}.${ext}`;
+      const { error: storageErr } = await supabase.storage.from('stl-images').upload(fileName, formValues.imageFile);
+      if (storageErr) throw storageErr;
       imagePath = fileName;
     }
 
-    setUploadStep('Salvando metadados no catálogo...');
-    const tagsArray = formValues.tags
-      ? formValues.tags.split(',').map((t) => t.trim()).filter(Boolean)
-      : [];
-
+    const tagsArray = formValues.tags ? formValues.tags.split(',').map((t) => t.trim()).filter(Boolean) : [];
     const { error: dbErr } = await supabase.from('stl_models').insert({
       user_id: session.user.id,
       name: formValues.name.trim() || driveData.name.replace(/\.zip$/i, ''),
@@ -823,28 +892,20 @@ export default function App() {
       image_path: imagePath,
       drive_file_id: driveData.id,
       drive_file_name: driveData.name,
-      drive_file_url: driveData.webViewLink || `https://drive.google.com/file/d/${driveData.id}/view`,
-      drive_file_size: Number(driveData.size || formValues.zipFile?.size || 0),
+      drive_file_url: driveData.webViewLink,
+      drive_file_size: Number(driveData.size || 0),
       drive_folder_id: folderId
     });
-
-    if (dbErr) throw new Error(`Falha ao salvar metadados: ${dbErr.message}`);
+    if (dbErr) throw dbErr;
   };
 
   const handleRetryMetadataSave = async () => {
     if (!pendingRecovery) return;
     setUploading(true);
     try {
-      await completeDatabaseRegistration(
-        pendingRecovery.driveData,
-        pendingRecovery.folderId,
-        pendingRecovery.formSnapshot
-      );
+      await completeDatabaseRegistration(pendingRecovery.driveData, pendingRecovery.folderId, pendingRecovery.formSnapshot);
       setPendingRecovery(null);
-      setUploadForm({
-        name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFile: null
-      });
-      showToast('Cadastro recuperado e concluído com sucesso!');
+      showToast('Cadastro recuperado com sucesso!');
       setActiveTab('catalogo');
       loadUserData();
     } catch (err) {
@@ -860,36 +921,22 @@ export default function App() {
     setLoadingDriveZips(true);
     try {
       const subFolders = await fetchRootSubfolders(settings.root_folder_id);
-
       const folderMap = { [settings.root_folder_id]: 'Pasta Raiz' };
-      subFolders.forEach((sf) => {
-        folderMap[sf.id] = sf.name;
-      });
+      subFolders.forEach((sf) => { folderMap[sf.id] = sf.name; });
 
       const allParentIds = [settings.root_folder_id, ...subFolders.map((f) => f.id)];
       const parentsCondition = allParentIds.map((id) => `'${id}' in parents`).join(' or ');
 
-      const zipsQ = encodeURIComponent(
-        `(${parentsCondition}) and (mimeType = 'application/zip' or mimeType = 'application/x-zip-compressed' or name contains '.zip') and trashed = false`
-      );
-      const res = await googleDriveFetch(
-        `https://www.googleapis.com/drive/v3/files?q=${zipsQ}&fields=files(id,name,size,createdTime,webViewLink,parents)&pageSize=100`
-      );
-      if (!res.ok) throw new Error('Erro ao listar arquivos ZIP do Google Drive.');
+      const zipsQ = encodeURIComponent(`(${parentsCondition}) and (mimeType = 'application/zip' or name contains '.zip') and trashed = false`);
+      const res = await googleDriveFetch(`https://www.googleapis.com/drive/v3/files?q=${zipsQ}&fields=files(id,name,size,webViewLink,parents)&pageSize=100`);
+      if (!res.ok) throw new Error('Erro ao listar ZIPs.');
       const data = await res.json();
 
-      const enrichedFiles = (data.files || []).map((file) => {
+      setDriveZipFiles((data.files || []).map((file) => {
         const parentId = file.parents?.[0] || settings.root_folder_id;
         const folderLabel = folderMap[parentId] || 'Pasta Raiz';
-        return {
-          ...file,
-          detectedFolderId: parentId,
-          detectedCategory: folderLabel !== 'Pasta Raiz' ? folderLabel : 'Geral',
-          folderLabel
-        };
-      });
-
-      setDriveZipFiles(enrichedFiles);
+        return { ...file, detectedFolderId: parentId, detectedCategory: folderLabel !== 'Pasta Raiz' ? folderLabel : 'Geral', folderLabel };
+      }));
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -906,80 +953,31 @@ export default function App() {
   const handleConfirmImport = async (e) => {
     e.preventDefault();
     if (!importingFile) return;
-
-    if (models.some((m) => m.drive_file_id === importingFile.id)) {
-      showToast('Este arquivo ZIP já está cadastrado.', 'error');
-      return;
-    }
-
     setUploading(true);
     try {
-      const targetFolderId = importingFile.detectedFolderId || settings.root_folder_id;
-      await completeDatabaseRegistration(importingFile, targetFolderId, importForm);
-      showToast(`Arquivo "${importingFile.name}" importado com sucesso!`);
+      await completeDatabaseRegistration(importingFile, importingFile.detectedFolderId || settings.root_folder_id, importForm);
+      showToast('Arquivo importado com sucesso!');
       setImportingFile(null);
       loadUserData();
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
       setUploading(false);
-      setUploadStep('');
     }
   };
 
-  const verifyDriveFileAvailability = async (model) => {
-    if (!googleConnected) return;
-    setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'checking' }));
-    try {
-      const res = await googleDriveFetch(
-        `https://www.googleapis.com/drive/v3/files/${model.drive_file_id}?fields=id,name,trashed`
-      );
-      if (!res.ok) {
-        setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'missing' }));
-        return;
-      }
-      const data = await res.json();
-      setDriveStatusCheck((prev) => ({
-        ...prev,
-        [model.id]: data.trashed ? 'missing' : 'available'
-      }));
-    } catch {
-      setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'missing' }));
-    }
-  };
-
-  const handleOpenDetails = (model) => {
-    setSelectedModel(model);
-    if (googleConnected) {
-      verifyDriveFileAvailability(model);
-    }
-  };
-
-  // ============================================================================
-  // EDIÇÃO COM SUPORTE A ALTERAÇÃO DE IMAGEM DE REFERÊNCIA
-  // ============================================================================
   const handleSaveEdit = async (e) => {
     e.preventDefault();
     if (!editingModel) return;
     setUploading(true);
     try {
       let imagePath = editingModel.image_path;
-
-      // Se o usuário selecionou uma nova imagem para substituir a anterior:
       if (editingModel.newImageFile) {
         const ext = editingModel.newImageFile.name.split('.').pop();
-        const fileName = `${session.user.id}/${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
-
-        const { error: upErr } = await supabase.storage
-          .from('stl-images')
-          .upload(fileName, editingModel.newImageFile);
+        const fileName = `${session.user.id}/${Date.now()}.${ext}`;
+        const { error: upErr } = await supabase.storage.from('stl-images').upload(fileName, editingModel.newImageFile);
         if (upErr) throw upErr;
-
-        // Se já existia uma imagem antiga, remove do bucket privado para não acumular lixo
-        if (editingModel.image_path) {
-          await supabase.storage.from('stl-images').remove([editingModel.image_path]);
-        }
-
+        if (editingModel.image_path) await supabase.storage.from('stl-images').remove([editingModel.image_path]);
         imagePath = fileName;
       }
 
@@ -987,26 +985,22 @@ export default function App() {
         ? editingModel.tagsInput.split(',').map((t) => t.trim()).filter(Boolean)
         : (editingModel.tags || []);
 
-      const { error } = await supabase
-        .from('stl_models')
-        .update({
-          name: editingModel.name.trim(),
-          description: editingModel.description.trim(),
-          category: editingModel.category,
-          tags: tagsArray,
-          notes: editingModel.notes.trim(),
-          image_path: imagePath,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', editingModel.id);
+      await supabase.from('stl_models').update({
+        name: editingModel.name.trim(),
+        description: editingModel.description.trim(),
+        category: editingModel.category,
+        tags: tagsArray,
+        notes: editingModel.notes.trim(),
+        image_path: imagePath,
+        updated_at: new Date().toISOString()
+      }).eq('id', editingModel.id);
 
-      if (error) throw error;
-      showToast('Cadastro e imagem atualizados com sucesso!');
+      showToast('Atualizado com sucesso!');
       setEditingModel(null);
       setSelectedModel(null);
       loadUserData();
     } catch (err) {
-      showToast(`Erro ao atualizar: ${err.message}`, 'error');
+      showToast(err.message, 'error');
     } finally {
       setUploading(false);
     }
@@ -1017,49 +1011,18 @@ export default function App() {
     setUploading(true);
     try {
       if (deleteAlsoFromDrive) {
-        let driveDel = await googleDriveFetch(
-          `https://www.googleapis.com/drive/v3/files/${deleteConfirmModel.drive_file_id}`,
-          { method: 'DELETE' }
-        );
-
+        let driveDel = await googleDriveFetch(`https://www.googleapis.com/drive/v3/files/${deleteConfirmModel.drive_file_id}`, { method: 'DELETE' });
         if (!driveDel.ok && driveDel.status !== 404) {
-          const trashRes = await googleDriveFetch(
-            `https://www.googleapis.com/drive/v3/files/${deleteConfirmModel.drive_file_id}`,
-            {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ trashed: true })
-            }
-          );
-
-          if (!trashRes.ok) {
-            const errData = await trashRes.json().catch(() => ({}));
-            throw new Error(
-              errData?.error?.message ||
-              'O escopo drive.file permite excluir pelo app apenas arquivos enviados pelo próprio app.'
-            );
-          }
+          await googleDriveFetch(`https://www.googleapis.com/drive/v3/files/${deleteConfirmModel.drive_file_id}`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true })
+          });
         }
       }
+      if (deleteConfirmModel.image_path) await supabase.storage.from('stl-images').remove([deleteConfirmModel.image_path]);
+      await supabase.from('stl_models').delete().eq('id', deleteConfirmModel.id);
 
-      if (deleteConfirmModel.image_path) {
-        await supabase.storage.from('stl-images').remove([deleteConfirmModel.image_path]);
-      }
-
-      const { error } = await supabase
-        .from('stl_models')
-        .delete()
-        .eq('id', deleteConfirmModel.id);
-
-      if (error) throw error;
-
-      showToast(
-        deleteAlsoFromDrive
-          ? 'Excluído do catálogo e do Google Drive com sucesso!'
-          : 'Removido do catálogo (arquivo ZIP preservado no Drive).'
-      );
+      showToast('Modelo excluído!');
       setDeleteConfirmModel(null);
-      setDeleteAlsoFromDrive(false);
       setSelectedModel(null);
       loadUserData();
     } catch (err) {
@@ -1073,7 +1036,7 @@ export default function App() {
     <div className={`${sizeClass} rounded-xl overflow-hidden bg-[#e4e0d7] flex items-center justify-center border border-[#262522] shrink-0`}>
       <img
         src="/logo.png"
-        alt="Biblioteca STL Logo"
+        alt="Logo"
         className="w-full h-full object-cover"
         onError={(e) => {
           e.target.style.display = 'none';
@@ -1089,17 +1052,13 @@ export default function App() {
         <label className="block text-xs font-medium text-[#a39e93]">Categoria (Subpasta no Drive)</label>
         <button
           type="button"
-          onClick={() => {
-            setAddingCategoryContext(addingCategoryContext === contextKey ? null : contextKey);
-            setNewCategoryName('');
-          }}
-          className="text-[11px] font-semibold text-[#e4e0d7] hover:text-white flex items-center gap-1 cursor-pointer transition"
+          onClick={() => { setAddingCategoryContext(addingCategoryContext === contextKey ? null : contextKey); setNewCategoryName(''); }}
+          className="text-[11px] font-semibold text-[#e4e0d7] hover:text-white flex items-center gap-1 cursor-pointer"
         >
           <Plus className="w-3.5 h-3.5" />
           <span>{addingCategoryContext === contextKey ? 'Cancelar' : 'Nova Categoria'}</span>
         </button>
       </div>
-
       {addingCategoryContext === contextKey ? (
         <div className="flex gap-2">
           <input
@@ -1108,13 +1067,13 @@ export default function App() {
             onChange={(e) => setNewCategoryName(e.target.value)}
             placeholder="Nome da categoria..."
             autoFocus
-            className="flex-1 px-3 py-2 bg-[#000000] border border-[#e4e0d7] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none"
+            className="flex-1 px-3 py-2 bg-[#000000] border border-[#e4e0d7] rounded-xl text-sm text-[#e4e0d7]"
           />
           <button
             type="button"
             disabled={savingCategory}
             onClick={() => handleAddPermanentCategory(contextKey)}
-            className="px-3.5 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold cursor-pointer shrink-0 transition"
+            className="px-3.5 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
           >
             Salvar
           </button>
@@ -1123,11 +1082,9 @@ export default function App() {
         <select
           value={currentValue}
           onChange={(e) => onSelectChange(e.target.value)}
-          className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7]"
+          className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] focus:outline-none"
         >
-          {allCategories.map((c) => (
-            <option key={c} value={c} className="bg-[#0a0a0a] text-[#e4e0d7]">{c}</option>
-          ))}
+          {allCategories.map((c) => <option key={c} value={c} className="bg-[#0a0a0a] text-[#e4e0d7]">{c}</option>)}
         </select>
       )}
     </div>
@@ -1137,11 +1094,7 @@ export default function App() {
     return models.filter((m) => {
       const matchesCat = selectedCategory === 'Todas' || m.category === selectedCategory;
       const q = searchQuery.toLowerCase();
-      const matchesQuery =
-        !q ||
-        m.name?.toLowerCase().includes(q) ||
-        m.description?.toLowerCase().includes(q) ||
-        m.tags?.some((t) => t.toLowerCase().includes(q));
+      const matchesQuery = !q || m.name?.toLowerCase().includes(q) || m.description?.toLowerCase().includes(q) || m.tags?.some((t) => t.toLowerCase().includes(q));
       return matchesCat && matchesQuery;
     });
   }, [models, selectedCategory, searchQuery]);
@@ -1179,50 +1132,22 @@ export default function App() {
               <p className="text-xs text-[#a39e93]">Catálogo Pessoal &bull; Google Drive + Supabase</p>
             </div>
           </div>
-
-          {authError && (
-            <div className="p-3 rounded-xl bg-[#b94a48]/15 border border-[#b94a48]/40 text-[#e89b99] text-xs">
-              {authError}
-            </div>
-          )}
-
+          {authError && <div className="p-3 rounded-xl bg-[#b94a48]/15 border border-[#b94a48]/40 text-[#e89b99] text-xs">{authError}</div>}
           <form onSubmit={handleSupabaseAuth} className="space-y-4">
             <div>
               <label className="block text-xs font-medium text-[#a39e93] mb-1">Seu E-mail Pessoal</label>
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="seuemail@exemplo.com"
-                className="w-full px-3.5 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-              />
+              <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="seuemail@exemplo.com" className="w-full px-3.5 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
             </div>
             <div>
               <label className="block text-xs font-medium text-[#a39e93] mb-1">Senha</label>
-              <input
-                type="password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                className="w-full px-3.5 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-              />
+              <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" className="w-full px-3.5 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
             </div>
-            <button
-              type="submit"
-              className="w-full py-2.5 px-4 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] font-bold rounded-xl text-sm transition cursor-pointer"
-            >
+            <button type="submit" className="w-full py-2.5 px-4 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] font-bold rounded-xl text-sm transition cursor-pointer">
               {isSignUp ? 'Criar Conta Pessoal' : 'Entrar na Biblioteca'}
             </button>
           </form>
-
           <div className="text-center pt-3 border-t border-[#1c1b19]">
-            <button
-              type="button"
-              onClick={() => setIsSignUp(!isSignUp)}
-              className="text-xs text-[#a39e93] hover:text-[#e4e0d7] transition cursor-pointer"
-            >
+            <button type="button" onClick={() => setIsSignUp(!isSignUp)} className="text-xs text-[#a39e93] hover:text-[#e4e0d7] transition cursor-pointer">
               {isSignUp ? 'Já possui conta? Clique para entrar' : 'Primeira vez aqui? Crie sua conta pessoal'}
             </button>
           </div>
@@ -1235,11 +1160,7 @@ export default function App() {
     <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex flex-col">
       {toast && (
         <div className="fixed bottom-5 right-5 z-50 max-w-sm w-[90%] sm:max-w-md px-4 py-3 rounded-xl shadow-2xl border flex items-center gap-3 bg-[#0f0f0e] border-[#e4e0d7]/30 text-sm">
-          {toast.type === 'error' ? (
-            <AlertTriangle className="w-5 h-5 text-[#d96b68] shrink-0" />
-          ) : (
-            <CheckCircle2 className="w-5 h-5 text-[#70a37f] shrink-0" />
-          )}
+          {toast.type === 'error' ? <AlertTriangle className="w-5 h-5 text-[#d96b68] shrink-0" /> : <CheckCircle2 className="w-5 h-5 text-[#70a37f] shrink-0" />}
           <span className="text-[#e4e0d7]">{toast.message}</span>
         </div>
       )}
@@ -1255,44 +1176,56 @@ export default function App() {
             </div>
           </div>
 
-          <nav className="flex items-center gap-1 sm:gap-2 overflow-x-auto py-1">
-            <button
-              onClick={() => setActiveTab('catalogo')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-                }`}
-            >
-              <Box className="w-4 h-4" />
-              <span>Catálogo ({models.length})</span>
+          {/* Navegação Desktop */}
+          <nav className="hidden md:flex items-center gap-2">
+            <button onClick={() => setActiveTab('catalogo')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
+              <Box className="w-4 h-4" /><span>Catálogo ({models.length})</span>
             </button>
-
-            <button
-              onClick={() => setActiveTab('upload')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'upload' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-                }`}
-            >
-              <Upload className="w-4 h-4" />
-              <span>Enviar</span>
+            <button onClick={() => setActiveTab('upload')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'upload' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
+              <Upload className="w-4 h-4" /><span>Enviar</span>
             </button>
-
-            <button
-              onClick={() => setActiveTab('importar')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'importar' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-                }`}
-            >
-              <FolderDown className="w-4 h-4" />
-              <span>Importar</span>
+            <button onClick={() => setActiveTab('importar')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'importar' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
+              <FolderDown className="w-4 h-4" /><span>Importar</span>
             </button>
-
-            <button
-              onClick={() => setActiveTab('configuracoes')}
-              className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'
-                }`}
-            >
-              <Settings className="w-4 h-4" />
-              <span className="hidden lg:inline">Configurações</span>
+            <button onClick={() => setActiveTab('calculadora')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'calculadora' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
+              <Calculator className="w-4 h-4" /><span>Calculadora</span>
+            </button>
+            <button onClick={() => setActiveTab('configuracoes')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
+              <Settings className="w-4 h-4" /><span>Configurações</span>
             </button>
           </nav>
+
+          {/* Botão Hambúrguer Mobile */}
+          <div className="md:hidden flex items-center">
+            <button
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              className="p-2 rounded-xl bg-[#0a0a0a] border border-[#262522] text-[#e4e0d7] cursor-pointer"
+            >
+              {mobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
+            </button>
+          </div>
         </div>
+
+        {/* Menu Suspenso Mobile (3 Barrinhas) */}
+        {mobileMenuOpen && (
+          <div className="md:hidden bg-[#0a0a0a] border-b border-[#262522] px-4 py-3 space-y-2">
+            <button onClick={() => { setActiveTab('catalogo'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
+              <Box className="w-4 h-4" /><span>Catálogo ({models.length})</span>
+            </button>
+            <button onClick={() => { setActiveTab('upload'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'upload' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
+              <Upload className="w-4 h-4" /><span>Enviar ZIP</span>
+            </button>
+            <button onClick={() => { setActiveTab('importar'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'importar' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
+              <FolderDown className="w-4 h-4" /><span>Importar do Drive</span>
+            </button>
+            <button onClick={() => { setActiveTab('calculadora'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'calculadora' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
+              <Calculator className="w-4 h-4" /><span>Calculadora de Gastos</span>
+            </button>
+            <button onClick={() => { setActiveTab('configuracoes'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
+              <Settings className="w-4 h-4" /><span>Configurações</span>
+            </button>
+          </div>
+        )}
       </header>
 
       {/* Banner Google Drive */}
@@ -1301,27 +1234,13 @@ export default function App() {
           <div className="max-w-7xl mx-auto px-3 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2.5 text-xs sm:text-sm text-[#e4e0d7]">
               <HardDrive className="w-5 h-5 text-[#c89d66] shrink-0" />
-              {!googleConnected ? (
-                <span>Conecte sua conta Google para gerenciar seus arquivos e pastas por categoria no Google Drive.</span>
-              ) : (
-                <span>Selecione ou crie a pasta raiz <strong>Biblioteca STL</strong> no seu Google Drive.</span>
-              )}
+              {!googleConnected ? <span>Conecte sua conta Google para gerenciar seus arquivos e pastas no Drive.</span> : <span>Selecione ou crie a pasta raiz <strong>Biblioteca STL</strong> no seu Google Drive.</span>}
             </div>
             <div className="self-end sm:self-auto">
               {!googleConnected ? (
-                <button
-                  onClick={handleConnectGoogle}
-                  className="px-4 py-1.5 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-lg text-xs font-bold transition cursor-pointer"
-                >
-                  Conectar Conta Google
-                </button>
+                <button onClick={handleConnectGoogle} className="px-4 py-1.5 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-lg text-xs font-bold transition cursor-pointer">Conectar Conta Google</button>
               ) : (
-                <button
-                  onClick={() => openFolderPicker()}
-                  className="px-4 py-1.5 bg-[#c89d66] hover:bg-[#b88c56] text-[#000000] rounded-lg text-xs font-bold transition cursor-pointer"
-                >
-                  Configurar Pasta Raiz
-                </button>
+                <button onClick={() => openFolderPicker()} className="px-4 py-1.5 bg-[#c89d66] hover:bg-[#b88c56] text-[#000000] rounded-lg text-xs font-bold transition cursor-pointer">Configurar Pasta Raiz</button>
               )}
             </div>
           </div>
@@ -1335,23 +1254,11 @@ export default function App() {
             <div className="flex flex-col md:flex-row gap-3 sm:gap-4 items-stretch md:items-center justify-between">
               <div className="relative flex-1">
                 <Search className="w-4 h-4 text-[#8c877e] absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Buscar modelo por nome, descrição ou tag..."
-                  className="w-full pl-10 pr-4 py-2.5 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none focus:border-[#e4e0d7]"
-                />
+                <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Buscar modelo por nome, descrição ou tag..." className="w-full pl-10 pr-4 py-2.5 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none" />
               </div>
-
               <div className="flex items-center gap-2 overflow-x-auto pb-2 md:pb-0">
                 {['Todas', ...allCategories].map((cat) => (
-                  <button
-                    key={cat}
-                    onClick={() => setSelectedCategory(cat)}
-                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer ${selectedCategory === cat ? 'bg-[#e4e0d7] text-[#000000]' : 'bg-[#0a0a0a] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522]'
-                      }`}
-                  >
+                  <button key={cat} onClick={() => setSelectedCategory(cat)} className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer ${selectedCategory === cat ? 'bg-[#e4e0d7] text-[#000000]' : 'bg-[#0a0a0a] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522]'}`}>
                     {cat}
                   </button>
                 ))}
@@ -1359,32 +1266,17 @@ export default function App() {
             </div>
 
             {loadingData ? (
-              <div className="py-20 text-center text-[#a39e93] flex flex-col items-center gap-3">
-                <RefreshCw className="w-7 h-7 animate-spin text-[#e4e0d7]" />
-                <span className="text-sm">Carregando seus modelos 3D...</span>
-              </div>
+              <div className="py-20 text-center text-[#a39e93] flex flex-col items-center gap-3"><RefreshCw className="w-7 h-7 animate-spin text-[#e4e0d7]" /><span className="text-sm">Carregando seus modelos 3D...</span></div>
             ) : filteredModels.length === 0 ? (
               <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 sm:p-12 text-center space-y-4">
                 <FileArchive className="w-12 h-12 text-[#5e5a52] mx-auto" />
                 <div className="space-y-1">
                   <h3 className="text-base font-semibold text-[#e4e0d7]">Nenhum modelo STL encontrado</h3>
-                  <p className="text-xs text-[#8c877e] max-w-md mx-auto">
-                    Envie um novo arquivo ZIP (que será salvo automaticamente na subpasta da categoria no seu Google Drive) ou importe arquivos já existentes.
-                  </p>
+                  <p className="text-xs text-[#8c877e] max-w-md mx-auto">Envie um novo arquivo ZIP ou importe arquivos já existentes.</p>
                 </div>
                 <div className="flex flex-wrap justify-center gap-3 pt-2">
-                  <button
-                    onClick={() => setActiveTab('upload')}
-                    className="px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold transition cursor-pointer"
-                  >
-                    Enviar Novo ZIP
-                  </button>
-                  <button
-                    onClick={() => setActiveTab('importar')}
-                    className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold transition cursor-pointer"
-                  >
-                    Importar do Drive
-                  </button>
+                  <button onClick={() => setActiveTab('upload')} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold transition cursor-pointer">Enviar Novo ZIP</button>
+                  <button onClick={() => setActiveTab('importar')} className="px-4 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold transition cursor-pointer">Importar do Drive</button>
                 </div>
               </div>
             ) : (
@@ -1392,48 +1284,19 @@ export default function App() {
                 {filteredModels.map((model) => {
                   const imgUrl = signedUrls[model.id];
                   return (
-                    <div
-                      key={model.id}
-                      onClick={() => handleOpenDetails(model)}
-                      className="group bg-[#0a0a0a] border border-[#262522] hover:border-[#e4e0d7]/60 rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg"
-                    >
+                    <div key={model.id} onClick={() => handleOpenDetails(model)} className="group bg-[#0a0a0a] border border-[#262522] hover:border-[#e4e0d7]/60 rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg">
                       <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
-                        {imgUrl ? (
-                          <img
-                            src={imgUrl}
-                            alt={model.name}
-                            className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
-                          />
-                        ) : (
-                          <div className="flex flex-col items-center gap-1 text-[#5e5a52]">
-                            <Box className="w-10 h-10" />
-                            <span className="text-[11px]">Sem imagem</span>
-                          </div>
-                        )}
-                        <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[#000000]/85 backdrop-blur text-[#e4e0d7] border border-[#e4e0d7]/30">
-                          {model.category}
-                        </span>
+                        {imgUrl ? <img src={imgUrl} alt={model.name} className="w-full h-full object-cover group-hover:scale-105 transition duration-300" /> : <div className="flex flex-col items-center gap-1 text-[#5e5a52]"><Box className="w-10 h-10" /><span className="text-[11px]">Sem imagem</span></div>}
+                        <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[#000000]/85 backdrop-blur text-[#e4e0d7] border border-[#e4e0d7]/30">{model.category}</span>
                       </div>
-
                       <div className="p-4 flex-1 flex flex-col justify-between space-y-3">
                         <div>
-                          <h3 className="font-bold text-[#e4e0d7] text-sm group-hover:text-white transition line-clamp-1">
-                            {model.name}
-                          </h3>
-                          <p className="text-xs text-[#8c877e] line-clamp-2 mt-1">
-                            {model.description || 'Sem descrição.'}
-                          </p>
+                          <h3 className="font-bold text-[#e4e0d7] text-sm group-hover:text-white transition line-clamp-1">{model.name}</h3>
+                          <p className="text-xs text-[#8c877e] line-clamp-2 mt-1">{model.description || 'Sem descrição.'}</p>
                         </div>
-
                         <div className="space-y-2 pt-2 border-t border-[#1c1b19]">
                           {model.tags?.length > 0 && (
-                            <div className="flex flex-wrap gap-1">
-                              {model.tags.slice(0, 3).map((tag, idx) => (
-                                <span key={idx} className="px-2 py-0.5 bg-[#141413] text-[#a39e93] border border-[#262522] rounded text-[10px]">
-                                  #{tag}
-                                </span>
-                              ))}
-                            </div>
+                            <div className="flex flex-wrap gap-1">{model.tags.slice(0, 3).map((tag, idx) => <span key={idx} className="px-2 py-0.5 bg-[#141413] text-[#a39e93] border border-[#262522] rounded text-[10px]">#{tag}</span>)}</div>
                           )}
                           <div className="flex items-center justify-between text-[11px] text-[#8c877e]">
                             <span>{formatBytes(model.drive_file_size)}</span>
@@ -1453,125 +1316,51 @@ export default function App() {
           <div className="max-w-2xl mx-auto bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-6">
             <div>
               <h2 className="text-lg font-bold text-[#e4e0d7]">Enviar Novo Modelo STL (.ZIP)</h2>
-              <p className="text-xs text-[#8c877e] mt-1">
-                {settings.organize_by_subfolders
-                  ? `O arquivo ZIP será salvo dentro da subpasta "${uploadForm.category}" na sua pasta raiz "${settings.root_folder_name || 'Biblioteca STL'}".`
-                  : `O arquivo ZIP será enviado diretamente para a pasta raiz "${settings.root_folder_name || 'Biblioteca STL'}".`}
-              </p>
+              <p className="text-xs text-[#8c877e] mt-1">O arquivo ZIP será salvo na subpasta correspondente no Google Drive.</p>
             </div>
-
             {pendingRecovery && (
               <div className="p-4 rounded-xl bg-[#c89d66]/10 border border-[#c89d66]/40 space-y-3">
-                <div className="flex items-center gap-2 text-[#c89d66] text-sm font-semibold">
-                  <AlertTriangle className="w-5 h-5 shrink-0" />
-                  <span>Upload no Drive concluído, mas o salvamento falhou!</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleRetryMetadataSave}
-                  disabled={uploading}
-                  className="w-full sm:w-auto px-4 py-2 bg-[#c89d66] text-[#000000] font-bold rounded-lg text-xs cursor-pointer"
-                >
-                  Recuperar e Concluir Cadastro
-                </button>
+                <div className="flex items-center gap-2 text-[#c89d66] text-sm font-semibold"><AlertTriangle className="w-5 h-5 shrink-0" /><span>Upload concluído, mas o salvamento falhou!</span></div>
+                <button type="button" onClick={handleRetryMetadataSave} disabled={uploading} className="px-4 py-2 bg-[#c89d66] text-[#000000] font-bold rounded-lg text-xs cursor-pointer">Recuperar e Concluir Cadastro</button>
               </div>
             )}
-
             <form onSubmit={handleUploadNewModel} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-medium text-[#a39e93] mb-1">Nome do Modelo *</label>
-                  <input
-                    type="text"
-                    required
-                    value={uploadForm.name}
-                    onChange={(e) => setUploadForm({ ...uploadForm, name: e.target.value })}
-                    placeholder="Ex: Dragão Articulado"
-                    className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-                  />
+                  <input type="text" required value={uploadForm.name} onChange={(e) => setUploadForm({ ...uploadForm, name: e.target.value })} placeholder="Ex: Dragão" className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
                 </div>
                 {renderCategorySelector(uploadForm.category, (val) => setUploadForm({ ...uploadForm, category: val }), 'upload')}
               </div>
-
               <div>
                 <label className="block text-xs font-medium text-[#a39e93] mb-1">Descrição</label>
-                <textarea
-                  rows={2}
-                  value={uploadForm.description}
-                  onChange={(e) => setUploadForm({ ...uploadForm, description: e.target.value })}
-                  placeholder="Detalhes..."
-                  className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-                />
+                <textarea rows={2} value={uploadForm.description} onChange={(e) => setUploadForm({ ...uploadForm, description: e.target.value })} placeholder="Detalhes..." className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
               </div>
-
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Tags (separadas por vírgula)</label>
-                  <input
-                    type="text"
-                    value={uploadForm.tags}
-                    onChange={(e) => setUploadForm({ ...uploadForm, tags: e.target.value })}
-                    placeholder="rpg, dragao"
-                    className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-                  />
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Tags (vírgula)</label>
+                  <input type="text" value={uploadForm.tags} onChange={(e) => setUploadForm({ ...uploadForm, tags: e.target.value })} placeholder="rpg, stl" className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Observações de Impressão</label>
-                  <input
-                    type="text"
-                    value={uploadForm.notes}
-                    onChange={(e) => setUploadForm({ ...uploadForm, notes: e.target.value })}
-                    placeholder="PLA 205°C"
-                    className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-                  />
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Observações</label>
+                  <input type="text" value={uploadForm.notes} onChange={(e) => setUploadForm({ ...uploadForm, notes: e.target.value })} placeholder="PLA 205°C" className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
                 </div>
               </div>
-
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
                 <div className="p-4 rounded-xl bg-[#000000] border border-dashed border-[#383632] space-y-2">
-                  <label className="block text-xs font-semibold text-[#e4e0d7]">1. Arquivo ZIP (Google Drive) *</label>
-                  <input
-                    type="file"
-                    accept=".zip,application/zip"
-                    required
-                    onChange={(e) => {
-                      const file = e.target.files?.[0] || null;
-                      setUploadForm((prev) => ({
-                        ...prev,
-                        zipFile: file,
-                        name: prev.name || (file ? file.name.replace(/\.zip$/i, '') : '')
-                      }));
-                    }}
-                    className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#e4e0d7] file:text-[#000000] file:font-semibold"
-                  />
+                  <label className="block text-xs font-semibold text-[#e4e0d7]">1. Arquivo ZIP *</label>
+                  <input type="file" accept=".zip,application/zip" required onChange={(e) => { const file = e.target.files?.[0] || null; setUploadForm((prev) => ({ ...prev, zipFile: file, name: prev.name || (file ? file.name.replace(/\.zip$/i, '') : '') })); }} className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#e4e0d7] file:text-[#000000] file:font-semibold" />
                   {uploadForm.zipFile && <p className="text-[11px] text-[#70a37f] truncate">{uploadForm.zipFile.name}</p>}
                 </div>
-
                 <div className="p-4 rounded-xl bg-[#000000] border border-dashed border-[#383632] space-y-2">
-                  <label className="block text-xs font-semibold text-[#c89d66]">2. Imagem de Referência (Supabase)</label>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => setUploadForm({ ...uploadForm, imageFile: e.target.files?.[0] || null })}
-                    className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]"
-                  />
+                  <label className="block text-xs font-semibold text-[#c89d66]">2. Imagem de Referência</label>
+                  <input type="file" accept="image/*" onChange={(e) => setUploadForm({ ...uploadForm, imageFile: e.target.files?.[0] || null })} className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]" />
                   {uploadForm.imageFile && <p className="text-[11px] text-[#70a37f] truncate">{uploadForm.imageFile.name}</p>}
                 </div>
               </div>
-
-              {uploading && (
-                <div className="p-3 rounded-xl bg-[#141413] border border-[#e4e0d7]/30 flex items-center gap-3 text-xs text-[#e4e0d7]">
-                  <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
-                  <span>{uploadStep || 'Processando...'}</span>
-                </div>
-              )}
-
+              {uploading && <div className="p-3 rounded-xl bg-[#141413] border border-[#e4e0d7]/30 flex items-center gap-3 text-xs text-[#e4e0d7]"><RefreshCw className="w-4 h-4 animate-spin shrink-0" /><span>{uploadStep || 'Processando...'}</span></div>}
               <div className="flex justify-end pt-2">
-                <button
-                  type="submit"
-                  disabled={uploading}
-                  className="w-full sm:w-auto px-6 py-2.5 bg-[#e4e0d7] hover:bg-[#d5d0c5] disabled:opacity-50 text-[#000000] font-bold rounded-xl text-sm transition cursor-pointer"
-                >
+                <button type="submit" disabled={uploading} className="px-6 py-2.5 bg-[#e4e0d7] hover:bg-[#d5d0c5] disabled:opacity-50 text-[#000000] font-bold rounded-xl text-sm transition cursor-pointer">
                   {uploading ? 'Enviando...' : 'Enviar para o Drive e Catalogar'}
                 </button>
               </div>
@@ -1583,43 +1372,28 @@ export default function App() {
           <div className="space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
               <div>
-                <h2 className="text-base sm:text-lg font-bold text-[#e4e0d7]">Importar ZIPs da Pasta Raiz e Subpastas</h2>
-                <p className="text-xs text-[#8c877e] mt-0.5">
-                  Reconhece arquivos .ZIP na pasta <strong className="text-[#e4e0d7]">{settings.root_folder_name || 'raiz'}</strong> e em todas as subpastas de categorias.
-                </p>
+                <h2 className="text-base sm:text-lg font-bold text-[#e4e0d7]">Importar ZIPs Existentes</h2>
+                <p className="text-xs text-[#8c877e] mt-0.5">Reconhece arquivos .ZIP na pasta raiz e subpastas.</p>
               </div>
-              <button
-                onClick={fetchExistingDriveZips}
-                disabled={loadingDriveZips}
-                className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer"
-              >
-                <RefreshCw className={`w-4 h-4 ${loadingDriveZips ? 'animate-spin' : ''}`} />
-                <span>Atualizar Lista</span>
+              <button onClick={fetchExistingDriveZips} disabled={loadingDriveZips} className="px-4 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer">
+                <RefreshCw className={`w-4 h-4 ${loadingDriveZips ? 'animate-spin' : ''}`} /><span>Atualizar Lista</span>
               </button>
             </div>
-
             {!settings.root_folder_id ? (
-              <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 text-center text-sm text-[#8c877e]">
-                Conecte o Google e selecione a pasta raiz.
-              </div>
+              <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 text-center text-sm text-[#8c877e]">Conecte o Google e selecione a pasta raiz.</div>
             ) : loadingDriveZips ? (
-              <div className="py-16 text-center text-[#a39e93] flex flex-col items-center gap-2">
-                <RefreshCw className="w-6 h-6 animate-spin text-[#e4e0d7]" />
-                <span className="text-xs">Consultando pasta raiz e subpastas de categorias no Google Drive...</span>
-              </div>
+              <div className="py-16 text-center text-[#a39e93] flex flex-col items-center gap-2"><RefreshCw className="w-6 h-6 animate-spin text-[#e4e0d7]" /><span className="text-xs">Buscando no Drive...</span></div>
             ) : driveZipFiles.length === 0 ? (
-              <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 text-center text-sm text-[#8c877e]">
-                Nenhum arquivo .ZIP encontrado na pasta raiz ou subpastas.
-              </div>
+              <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 text-center text-sm text-[#8c877e]">Nenhum arquivo .ZIP encontrado.</div>
             ) : (
               <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl overflow-x-auto">
                 <table className="w-full text-left border-collapse text-sm min-w-[640px]">
                   <thead>
                     <tr className="border-b border-[#262522] text-xs text-[#8c877e] bg-[#000000]">
                       <th className="py-3.5 px-4">Arquivo ZIP</th>
-                      <th className="py-3.5 px-4">Local / Subpasta</th>
+                      <th className="py-3.5 px-4">Local</th>
                       <th className="py-3.5 px-4">Tamanho</th>
-                      <th className="py-3.5 px-4 text-right">Status / Ação</th>
+                      <th className="py-3.5 px-4 text-right">Ação</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#1c1b19]">
@@ -1627,39 +1401,11 @@ export default function App() {
                       const alreadyRegistered = models.some((m) => m.drive_file_id === df.id);
                       return (
                         <tr key={df.id} className="hover:bg-[#121211]">
-                          <td className="py-3.5 px-4 font-medium text-[#e4e0d7] flex items-center gap-2.5">
-                            <FileArchive className="w-4 h-4 text-[#c89d66] shrink-0" />
-                            <span className="truncate max-w-[200px] sm:max-w-xs">{df.name}</span>
-                          </td>
-                          <td className="py-3.5 px-4 text-xs text-[#a39e93]">
-                            <span className="px-2 py-0.5 rounded bg-[#141413] border border-[#262522]">
-                              {df.folderLabel}
-                            </span>
-                          </td>
+                          <td className="py-3.5 px-4 font-medium text-[#e4e0d7] flex items-center gap-2.5"><FileArchive className="w-4 h-4 text-[#c89d66] shrink-0" /><span className="truncate max-w-xs">{df.name}</span></td>
+                          <td className="py-3.5 px-4 text-xs text-[#a39e93]"><span className="px-2 py-0.5 rounded bg-[#141413] border border-[#262522]">{df.folderLabel}</span></td>
                           <td className="py-3.5 px-4 text-xs text-[#8c877e]">{formatBytes(df.size)}</td>
                           <td className="py-3.5 px-4 text-right">
-                            {alreadyRegistered ? (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs bg-[#4d7c5b]/15 text-[#70a37f] border border-[#4d7c5b]/30">
-                                <Check className="w-3.5 h-3.5" /> Cadastrado
-                              </span>
-                            ) : (
-                              <button
-                                onClick={() => {
-                                  setImportingFile(df);
-                                  setImportForm({
-                                    name: df.name.replace(/\.zip$/i, ''),
-                                    description: '',
-                                    category: df.detectedCategory || 'Geral',
-                                    tags: '',
-                                    notes: '',
-                                    imageFile: null
-                                  });
-                                }}
-                                className="px-3 py-1.5 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-lg text-xs font-bold transition cursor-pointer"
-                              >
-                                Importar
-                              </button>
-                            )}
+                            {alreadyRegistered ? <span className="text-xs text-[#70a37f]">Cadastrado</span> : <button onClick={() => { setImportingFile(df); setImportForm({ name: df.name.replace(/\.zip$/i, ''), description: '', category: df.detectedCategory || 'Geral', tags: '', notes: '', imageFile: null }); }} className="px-3.5 py-1.5 bg-[#e4e0d7] text-[#000000] rounded-lg text-xs font-bold cursor-pointer">Importar</button>}
                           </td>
                         </tr>
                       );
@@ -1671,6 +1417,130 @@ export default function App() {
           </div>
         )}
 
+        {/* NOVA ABA: CALCULADORA DE GASTOS E PRECIFICAÇÃO */}
+        {activeTab === 'calculadora' && (
+          <div className="space-y-6 max-w-4xl mx-auto">
+            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-5 sm:p-6 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-xl bg-[#e4e0d7] text-[#000000]"><Calculator className="w-6 h-6" /></div>
+                  <div>
+                    <h2 className="text-lg font-bold text-[#e4e0d7]">Calculadora de Gastos e Precificação</h2>
+                    <p className="text-xs text-[#8c877e]">Calcule o custo exato de produção e defina seu preço de venda com lucro.</p>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => setNewMaterialModal(true)} className="px-3.5 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center gap-1.5 cursor-pointer">
+                    <Plus className="w-3.5 h-3.5 text-[#c89d66]" /><span>Novo Material</span>
+                  </button>
+                  <button onClick={() => setNewPrinterModal(true)} className="px-3.5 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center gap-1.5 cursor-pointer">
+                    <Plus className="w-3.5 h-3.5 text-[#c89d66]" /><span>Nova Impressora</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Formulário de Cálculo */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pt-4 border-t border-[#1c1b19]">
+                <div>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Impressora</label>
+                  <select value={calcForm.printerId} onChange={(e) => setCalcForm({ ...calcForm, printerId: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]">
+                    {printers.length === 0 && <option value="">Nenhuma impressora cadastrada</option>}
+                    {printers.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.power_watts}W)</option>)}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Material (Filamento / Resina)</label>
+                  <select value={calcForm.materialId} onChange={(e) => setCalcForm({ ...calcForm, materialId: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]">
+                    {materials.length === 0 && <option value="">Nenhum material cadastrado</option>}
+                    {materials.map((m) => <option key={m.id} value={m.id}>{m.type}: {m.name} ({m.color}) - R$ {m.price_per_unit}/kg</option>)}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Peso da Peça (gramas / ml)</label>
+                  <input type="number" min={1} value={calcForm.weightGrams} onChange={(e) => setCalcForm({ ...calcForm, weightGrams: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Tempo de Impressão (Horas)</label>
+                  <input type="number" step="0.1" min={0.1} value={calcForm.printHours} onChange={(e) => setCalcForm({ ...calcForm, printHours: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Taxa de Falha / Desperdício (%)</label>
+                  <input type="number" min={0} value={calcForm.failureRate} onChange={(e) => setCalcForm({ ...calcForm, failureRate: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Mão de Obra (Horas de Dedicação)</label>
+                  <input type="number" step="0.1" min={0} value={calcForm.laborHours} onChange={(e) => setCalcForm({ ...calcForm, laborHours: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+                </div>
+              </div>
+
+              {/* Checkboxes de Pós-Processamento */}
+              <div className="flex flex-wrap gap-6 pt-3 border-t border-[#1c1b19]">
+                <label className="flex items-center gap-2 text-xs text-[#e4e0d7] cursor-pointer">
+                  <input type="checkbox" checked={calcForm.washed} onChange={(e) => setCalcForm({ ...calcForm, washed: e.target.checked })} className="w-4 h-4 accent-[#e4e0d7]" />
+                  <span>Lavagem Realizada (Álcool / Insumos)</span>
+                </label>
+                <label className="flex items-center gap-2 text-xs text-[#e4e0d7] cursor-pointer">
+                  <input type="checkbox" checked={calcForm.painted} onChange={(e) => setCalcForm({ ...calcForm, painted: e.target.checked })} className="w-4 h-4 accent-[#e4e0d7]" />
+                  <span>Pintura / Primer / Acabamento Especial</span>
+                </label>
+              </div>
+
+              {/* Margem de Lucro Desejada */}
+              <div className="pt-3 border-t border-[#1c1b19] flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-xs font-semibold text-[#e4e0d7]">Margem de Lucro Desejada (Markup %)</p>
+                  <p className="text-[11px] text-[#8c877e]">Percentual de lucro aplicado sobre o custo total de produção.</p>
+                </div>
+                <input type="number" min={0} value={calcForm.profitMarginPct} onChange={(e) => setCalcForm({ ...calcForm, profitMarginPct: e.target.value })} className="w-28 px-3 py-1.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] text-right" />
+              </div>
+            </div>
+
+            {/* Resultado da Precificação */}
+            <div className="bg-[#0a0a0a] border border-[#e4e0d7]/30 rounded-2xl p-6 space-y-5 shadow-2xl">
+              <h3 className="font-bold text-[#e4e0d7] text-base border-b border-[#1c1b19] pb-3">Detalhamento de Custos e Sugestão de Venda</h3>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+                <div className="p-3.5 rounded-xl bg-[#000000] border border-[#262522]">
+                  <span className="text-[#8c877e] block">Matéria-Prima</span>
+                  <strong className="text-white text-sm mt-1 block">R$ {calculationResults.materialCost.toFixed(2)}</strong>
+                  <span className="text-[10px] text-[#6e6a61]">({calculationResults.effectiveWeightG.toFixed(1)}g c/ falha)</span>
+                </div>
+                <div className="p-3.5 rounded-xl bg-[#000000] border border-[#262522]">
+                  <span className="text-[#8c877e] block">Energia Elétrica</span>
+                  <strong className="text-white text-sm mt-1 block">R$ {calculationResults.energyCost.toFixed(2)}</strong>
+                  <span className="text-[10px] text-[#6e6a61]">(R$ {settings.energy_cost_kwh}/kWh)</span>
+                </div>
+                <div className="p-3.5 rounded-xl bg-[#000000] border border-[#262522]">
+                  <span className="text-[#8c877e] block">Depreciação Máquina</span>
+                  <strong className="text-white text-sm mt-1 block">R$ {calculationResults.depreciationCost.toFixed(2)}</strong>
+                  <span className="text-[10px] text-[#6e6a61]">Desgaste hora/máquina</span>
+                </div>
+                <div className="p-3.5 rounded-xl bg-[#000000] border border-[#262522]">
+                  <span className="text-[#8c877e] block">Pós-Proc. & Mão de Obra</span>
+                  <strong className="text-white text-sm mt-1 block">R$ {(calculationResults.postProcCost + calculationResults.laborCost).toFixed(2)}</strong>
+                  <span className="text-[10px] text-[#6e6a61]">Insumos + Horas de bancada</span>
+                </div>
+              </div>
+
+              <div className="p-5 rounded-2xl bg-[#121211] border border-[#c89d66]/40 flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div className="space-y-1 text-center sm:text-left">
+                  <span className="text-xs text-[#a39e93] block">Custo Total de Produção: <strong className="text-white">R$ {calculationResults.totalCost.toFixed(2)}</strong></span>
+                  <span className="text-xs text-[#70a37f] block">Lucro Líquido Estimado ({calcForm.profitMarginPct}%): <strong>R$ {calculationResults.netProfit.toFixed(2)}</strong></span>
+                </div>
+                <div className="text-center sm:text-right">
+                  <span className="text-xs text-[#c89d66] font-semibold uppercase tracking-wider block">Preço Sugerido de Venda</span>
+                  <span className="text-2xl sm:text-3xl font-black text-[#e4e0d7]">R$ {calculationResults.suggestedPrice.toFixed(2)}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {activeTab === 'configuracoes' && (
           <div className="max-w-3xl mx-auto space-y-6">
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-5">
@@ -1679,7 +1549,7 @@ export default function App() {
                   <HardDrive className="w-6 h-6 text-[#e4e0d7] shrink-0" />
                   <div>
                     <h3 className="font-bold text-[#e4e0d7] text-base">Google Drive (Armazenamento Principal)</h3>
-                    <p className="text-xs text-[#8c877e]">Renovação automática de sessão ativa</p>
+                    <p className="text-xs text-[#8c877e]">Sessão persistente ativa</p>
                   </div>
                 </div>
                 <span className={`px-3 py-1 rounded-full text-xs font-semibold ${googleConnected ? 'bg-[#4d7c5b]/15 text-[#70a37f] border border-[#4d7c5b]/30' : 'bg-[#c89d66]/15 text-[#c89d66]'}`}>
@@ -1688,257 +1558,158 @@ export default function App() {
               </div>
 
               <div className="p-4 rounded-xl bg-[#000000] border border-[#262522] space-y-2 text-xs">
-                <div className="flex flex-col sm:flex-row sm:justify-between gap-1">
-                  <span className="text-[#8c877e]">Pasta Raiz:</span>
-                  <span className="font-semibold text-[#e4e0d7] break-all">{settings.root_folder_name || 'Nenhuma'}</span>
-                </div>
-                <div className="flex flex-col sm:flex-row sm:justify-between gap-1">
-                  <span className="text-[#8c877e]">ID da Pasta Raiz:</span>
-                  <span className="font-mono text-[#c89d66] break-all">{settings.root_folder_id || '—'}</span>
-                </div>
+                <div className="flex justify-between"><span className="text-[#8c877e]">Pasta Raiz:</span><span className="font-semibold text-[#e4e0d7]">{settings.root_folder_name || 'Nenhuma'}</span></div>
+                <div className="flex justify-between"><span className="text-[#8c877e]">ID da Pasta:</span><span className="font-mono text-[#c89d66]">{settings.root_folder_id || '—'}</span></div>
               </div>
 
               <div className="flex flex-wrap gap-2.5">
-                <button
-                  onClick={handleConnectGoogle}
-                  className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
-                >
-                  {googleConnected ? 'Renovar Autorização Google' : 'Conectar Conta Google'}
-                </button>
+                <button onClick={handleConnectGoogle} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">Conectar Conta Google</button>
                 {googleConnected && (
                   <>
-                    <button
-                      onClick={() => openFolderPicker()}
-                      className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold cursor-pointer"
-                    >
-                      Selecionar Outra Pasta Raiz
-                    </button>
-                    {settings.root_folder_id && (
-                      <a
-                        href={`https://drive.google.com/drive/folders/${settings.root_folder_id}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold inline-flex items-center gap-1.5"
-                      >
-                        <span>Abrir Pasta Raiz no Drive</span>
-                        <ExternalLink className="w-3.5 h-3.5" />
-                      </a>
-                    )}
-                    <button
-                      onClick={handleDisconnectGoogle}
-                      className="px-4 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs font-semibold cursor-pointer"
-                    >
-                      Desconectar Google
-                    </button>
+                    <button onClick={() => openFolderPicker()} className="px-4 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold cursor-pointer">Selecionar Outra Pasta Raiz</button>
+                    <button onClick={handleDisconnectGoogle} className="px-4 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs font-semibold cursor-pointer">Desconectar Google</button>
                   </>
                 )}
               </div>
             </div>
 
-            {/* PAINEL VISUAL DE SUBPASTAS NO GOOGLE DRIVE */}
+            {/* Parâmetros Padrão da Calculadora nas Configurações */}
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <h3 className="font-bold text-[#e4e0d7] text-base">Parâmetros Padrão da Calculadora</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <h3 className="font-bold text-[#e4e0d7] text-base">Subpastas por Categoria no Google Drive</h3>
-                  <p className="text-xs text-[#8c877e]">
-                    Pastas criadas automaticamente dentro de <strong>{settings.root_folder_name || 'sua pasta raiz'}</strong>
-                  </p>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Custo da Energia (R$/kWh)</label>
+                  <input type="number" step="0.01" value={settings.energy_cost_kwh} onChange={(e) => handleSaveGeneralSettings({ energy_cost_kwh: Number(e.target.value) })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
                 </div>
-                {settings.root_folder_id && (
-                  <button
-                    type="button"
-                    disabled={syncingCategoryFolders}
-                    onClick={() => handleSyncAllCategorySubfolders(settings.root_folder_id, false)}
-                    className="px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer shrink-0"
-                  >
-                    <FolderPlus className={`w-4 h-4 ${syncingCategoryFolders ? 'animate-spin' : ''}`} />
-                    <span>{syncingCategoryFolders ? 'Montando Subpastas...' : 'Montar Todas as Subpastas Agora'}</span>
-                  </button>
-                )}
-              </div>
-
-              <div className="flex items-center justify-between gap-4 p-3.5 rounded-xl bg-[#000000] border border-[#262522]">
                 <div>
-                  <p className="text-xs sm:text-sm font-semibold text-[#e4e0d7]">Salvar novos ZIPs dentro das subpastas de categoria</p>
-                  <p className="text-[11px] text-[#8c877e]">
-                    Quando marcado, cada upload vai para a pasta da sua respectiva categoria.
-                  </p>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Taxa de Mão de Obra (R$/hora)</label>
+                  <input type="number" step="0.50" value={settings.labor_hourly_rate} onChange={(e) => handleSaveGeneralSettings({ labor_hourly_rate: Number(e.target.value) })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
                 </div>
-                <input
-                  type="checkbox"
-                  checked={settings.organize_by_subfolders}
-                  onChange={(e) => handleSaveGeneralSettings({ organize_by_subfolders: e.target.checked })}
-                  className="w-5 h-5 accent-[#e4e0d7] cursor-pointer shrink-0"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-xs text-[#8c877e]">
-                  <span>Subpastas detectadas na pasta raiz ({existingSubfolders.length}):</span>
-                  <button
-                    type="button"
-                    onClick={() => fetchRootSubfolders(settings.root_folder_id)}
-                    className="text-[#e4e0d7] hover:underline flex items-center gap-1 cursor-pointer"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${loadingSubfolders ? 'animate-spin' : ''}`} /> Atualizar
-                  </button>
+                <div>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Taxa de Falha Padrão (%)</label>
+                  <input type="number" value={settings.default_failure_rate} onChange={(e) => handleSaveGeneralSettings({ default_failure_rate: Number(e.target.value) })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
                 </div>
-
-                {existingSubfolders.length === 0 ? (
-                  <div className="p-4 rounded-xl bg-[#000000] border border-[#262522] text-xs text-[#8c877e] text-center">
-                    Nenhuma subpasta montada ainda. Clique no botão <strong>"Montar Todas as Subpastas Agora"</strong> acima para criá-las no seu Google Drive!
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {existingSubfolders.map((sf) => (
-                      <a
-                        key={sf.id}
-                        href={`https://drive.google.com/drive/folders/${sf.id}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="p-2.5 rounded-xl bg-[#000000] hover:bg-[#141413] border border-[#262522] flex items-center justify-between text-xs transition"
-                      >
-                        <div className="flex items-center gap-2 truncate">
-                          <Folder className="w-4 h-4 text-[#c89d66] shrink-0" />
-                          <span className="text-[#e4e0d7] font-medium truncate">{sf.name}</span>
-                        </div>
-                        <ExternalLink className="w-3.5 h-3.5 text-[#8c877e] shrink-0" />
-                      </a>
-                    ))}
-                  </div>
-                )}
+                <div>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Adicional Pós-Processamento (%)</label>
+                  <input type="number" value={settings.default_post_processing_pct} onChange={(e) => handleSaveGeneralSettings({ default_post_processing_pct: Number(e.target.value) })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+                </div>
               </div>
             </div>
 
+            {/* Gerenciamento de Materiais e Impressoras nas Configurações */}
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-4">
-              <div className="flex items-center gap-2.5">
-                <Tag className="w-5 h-5 text-[#e4e0d7]" />
-                <div>
-                  <h3 className="font-bold text-[#e4e0d7] text-base">Categorias da Biblioteca</h3>
-                  <p className="text-xs text-[#8c877e]">
-                    Ao adicionar uma nova categoria, a subpasta correspondente também é criada dentro da pasta raiz no Drive.
-                  </p>
-                </div>
+              <div className="flex justify-between items-center">
+                <h3 className="font-bold text-[#e4e0d7] text-base">Materiais Cadastrados ({materials.length})</h3>
+                <button onClick={() => setNewMaterialModal(true)} className="px-3 py-1.5 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">+ Adicionar Material</button>
               </div>
-
-              <div className="flex flex-wrap gap-1.5">
-                {BASE_CATEGORIES.map((cat) => (
-                  <span key={cat} className="px-2.5 py-1 rounded-lg text-xs bg-[#000000] text-[#a39e93] border border-[#262522]">
-                    {cat}
-                  </span>
+              <div className="space-y-2">
+                {materials.map((m) => (
+                  <div key={m.id} className="flex justify-between items-center p-3 rounded-xl bg-[#000000] border border-[#262522] text-xs">
+                    <div><strong className="text-white">{m.type}: {m.name}</strong> ({m.color}) &bull; <span className="text-[#c89d66]">R$ {m.price_per_unit}/kg</span></div>
+                    <button onClick={() => handleDeleteMaterial(m.id)} className="text-[#b94a48] hover:underline cursor-pointer">Excluir</button>
+                  </div>
                 ))}
               </div>
-
-              <div className="space-y-2 pt-2">
-                <span className="text-xs font-semibold text-[#e4e0d7]">Personalizadas:</span>
-                <div className="flex flex-wrap gap-2">
-                  {(settings.custom_categories || []).map((cat) => (
-                    <span key={cat} className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs bg-[#e4e0d7]/15 text-[#e4e0d7] border border-[#e4e0d7]/30">
-                      <span>{cat}</span>
-                      <button type="button" onClick={() => handleRemoveCustomCategory(cat)} className="cursor-pointer">
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex flex-col sm:flex-row gap-2 pt-2">
-                <input
-                  type="text"
-                  value={addingCategoryContext === 'settings' ? newCategoryName : ''}
-                  onFocus={() => setAddingCategoryContext('settings')}
-                  onChange={(e) => {
-                    setAddingCategoryContext('settings');
-                    setNewCategoryName(e.target.value);
-                  }}
-                  placeholder="Nova categoria permanente..."
-                  className="flex-1 px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-                />
-                <button
-                  type="button"
-                  onClick={() => handleAddPermanentCategory('settings')}
-                  className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
-                >
-                  Adicionar e Criar Pasta
-                </button>
-              </div>
             </div>
 
-            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="space-y-1">
-                <div className="flex items-center gap-2 text-[#70a37f] text-sm font-semibold">
-                  <ShieldCheck className="w-5 h-5 shrink-0" />
-                  <span>Supabase Conectado</span>
-                </div>
-                <p className="text-xs text-[#8c877e]">Conta: <strong className="text-[#e4e0d7]">{session.user.email}</strong></p>
+            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-4">
+              <div className="flex justify-between items-center">
+                <h3 className="font-bold text-[#e4e0d7] text-base">Impressoras Cadastradas ({printers.length})</h3>
+                <button onClick={() => setNewPrinterModal(true)} className="px-3 py-1.5 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">+ Adicionar Impressora</button>
               </div>
-              <button
-                onClick={() => supabase.auth.signOut()}
-                className="px-4 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <LogOut className="w-4 h-4" />
-                <span>Sair da Conta</span>
-              </button>
+              <div className="space-y-2">
+                {printers.map((p) => (
+                  <div key={p.id} className="flex justify-between items-center p-3 rounded-xl bg-[#000000] border border-[#262522] text-xs">
+                    <div><strong className="text-white">{p.name}</strong> ({p.power_watts}W) &bull; Valor: R$ {p.printer_value} &bull; Vida Útil: {p.lifespan_hours}h</div>
+                    <button onClick={() => handleDeletePrinter(p.id)} className="text-[#b94a48] hover:underline cursor-pointer">Excluir</button>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         )}
       </main>
 
-      {/* MODAL DE DETALHES */}
+      {/* Modal Novo Material */}
+      {newMaterialModal && (
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
+          <form onSubmit={handleSaveMaterial} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-md w-full p-6 space-y-4">
+            <h3 className="font-bold text-[#e4e0d7]">Cadastrar Novo Material</h3>
+            <div>
+              <label className="block text-xs text-[#a39e93] mb-1">Tipo</label>
+              <select value={matForm.type} onChange={(e) => setMatForm({ ...matForm, type: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]">
+                <option value="Filamento">Filamento</option>
+                <option value="Resina">Resina</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-[#a39e93] mb-1">Nome / Marca</label>
+              <input type="text" required value={matForm.name} onChange={(e) => setMatForm({ ...matForm, name: e.target.value })} placeholder="Ex: PLA Voolt3D" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+            </div>
+            <div>
+              <label className="block text-xs text-[#a39e93] mb-1">Cor</label>
+              <input type="text" required value={matForm.color} onChange={(e) => setMatForm({ ...matForm, color: e.target.value })} placeholder="Ex: Preto" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+            </div>
+            <div>
+              <label className="block text-xs text-[#a39e93] mb-1">Preço por Kg / Litro (R$)</label>
+              <input type="number" step="0.01" required value={matForm.price_per_unit} onChange={(e) => setMatForm({ ...matForm, price_per_unit: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button type="button" onClick={() => setNewMaterialModal(false)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
+              <button type="submit" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">Salvar Material</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Modal Nova Impressora */}
+      {newPrinterModal && (
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
+          <form onSubmit={handleSavePrinter} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-md w-full p-6 space-y-4">
+            <h3 className="font-bold text-[#e4e0d7]">Cadastrar Nova Impressora</h3>
+            <div>
+              <label className="block text-xs text-[#a39e93] mb-1">Nome do Modelo</label>
+              <input type="text" required value={printForm.name} onChange={(e) => setPrintForm({ ...printForm, name: e.target.value })} placeholder="Ex: Bambu Lab X1C" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+            </div>
+            <div>
+              <label className="block text-xs text-[#a39e93] mb-1">Consumo Energético (Watts)</label>
+              <input type="number" required value={printForm.power_watts} onChange={(e) => setPrintForm({ ...printForm, power_watts: e.target.value })} placeholder="Ex: 350" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+            </div>
+            <div>
+              <label className="block text-xs text-[#a39e93] mb-1">Valor de Compra da Impressora (R$)</label>
+              <input type="number" required value={printForm.printer_value} onChange={(e) => setPrintForm({ ...printForm, printer_value: e.target.value })} placeholder="Ex: 5000" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+            </div>
+            <div>
+              <label className="block text-xs text-[#a39e93] mb-1">Vida Útil Estimada (Horas de Uso)</label>
+              <input type="number" required value={printForm.lifespan_hours} onChange={(e) => setPrintForm({ ...printForm, lifespan_hours: e.target.value })} placeholder="Ex: 5000" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button type="button" onClick={() => setNewPrinterModal(false)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
+              <button type="submit" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">Salvar Impressora</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Modais Padrão (Detalhes, Edição, Importação e Pastas) */}
       {selectedModel && (
         <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
           <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
             <div className="aspect-video bg-[#000000] relative flex items-center justify-center border-b border-[#1c1b19]">
-              {signedUrls[selectedModel.id] ? (
-                <>
-                  <img src={signedUrls[selectedModel.id]} alt={selectedModel.name} className="w-full h-full object-contain" />
-                  <button
-                    onClick={() => setLightboxUrl(signedUrls[selectedModel.id])}
-                    className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-[#000000]/85 text-[#e4e0d7] text-xs flex items-center gap-1.5 border border-[#e4e0d7]/30 cursor-pointer"
-                  >
-                    <Eye className="w-4 h-4" /> Ampliar
-                  </button>
-                </>
-              ) : (
-                <div className="text-[#5e5a52] text-xs">Sem imagem</div>
-              )}
-              <button onClick={() => setSelectedModel(null)} className="absolute top-3 right-3 p-2 rounded-full bg-[#000000]/80 text-[#a39e93] cursor-pointer">
-                <X className="w-5 h-5" />
-              </button>
+              {signedUrls[selectedModel.id] ? <img src={signedUrls[selectedModel.id]} alt={selectedModel.name} className="w-full h-full object-contain" /> : <div className="text-[#5e5a52] text-xs">Sem imagem</div>}
+              <button onClick={() => setSelectedModel(null)} className="absolute top-3 right-3 p-2 rounded-full bg-[#000000]/80 text-[#a39e93] cursor-pointer"><X className="w-5 h-5" /></button>
             </div>
-
             <div className="p-4 sm:p-6 space-y-4 max-h-[60vh] overflow-y-auto">
               <div className="flex justify-between items-start">
-                <div>
-                  <span className="px-2.5 py-1 rounded-md text-xs bg-[#e4e0d7]/15 text-[#e4e0d7]">{selectedModel.category}</span>
-                  <h2 className="text-lg font-bold text-[#e4e0d7] mt-2">{selectedModel.name}</h2>
-                </div>
+                <div><span className="px-2.5 py-1 rounded-md text-xs bg-[#e4e0d7]/15 text-[#e4e0d7]">{selectedModel.category}</span><h2 className="text-lg font-bold text-[#e4e0d7] mt-2">{selectedModel.name}</h2></div>
                 <span className="text-xs text-[#8c877e]">{formatBytes(selectedModel.drive_file_size)}</span>
               </div>
               <p className="text-sm text-[#d5d0c5]">{selectedModel.description || 'Sem descrição.'}</p>
               <div className="flex justify-between pt-2 border-t border-[#1c1b19]">
-                <a
-                  href={selectedModel.drive_file_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold inline-flex items-center gap-2"
-                >
-                  <ExternalLink className="w-4 h-4" /> Abrir ZIP no Drive
-                </a>
+                <a href={selectedModel.drive_file_url} target="_blank" rel="noreferrer" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold inline-flex items-center gap-2"><ExternalLink className="w-4 h-4" /> Abrir ZIP no Drive</a>
                 <div className="flex gap-2">
-                  <button
-                    onClick={() => setEditingModel({ ...selectedModel, tagsInput: (selectedModel.tags || []).join(', ') })}
-                    className="px-3.5 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs cursor-pointer"
-                  >
-                    Editar
-                  </button>
-                  <button
-                    onClick={() => { setDeleteConfirmModel(selectedModel); setDeleteAlsoFromDrive(false); }}
-                    className="px-3.5 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs cursor-pointer"
-                  >
-                    Excluir
-                  </button>
+                  <button onClick={() => setEditingModel({ ...selectedModel, tagsInput: (selectedModel.tags || []).join(', ') })} className="px-3.5 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs cursor-pointer">Editar</button>
+                  <button onClick={() => { setDeleteConfirmModel(selectedModel); setDeleteAlsoFromDrive(false); }} className="px-3.5 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs cursor-pointer">Excluir</button>
                 </div>
               </div>
             </div>
@@ -1946,52 +1717,21 @@ export default function App() {
         </div>
       )}
 
-      {lightboxUrl && (
-        <div onClick={() => setLightboxUrl(null)} className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-3 cursor-zoom-out">
-          <img src={lightboxUrl} alt="Ampliada" className="max-w-full max-h-full rounded-xl border border-[#262522]" />
-        </div>
-      )}
-
-      {/* MODAL DE EDIÇÃO (COM TROCA DE IMAGEM) */}
       {editingModel && (
         <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 overflow-y-auto">
-          <form onSubmit={handleSaveEdit} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4 my-auto max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center">
-              <h3 className="font-bold text-[#e4e0d7]">Editar Cadastro e Imagem</h3>
-              <button type="button" onClick={() => setEditingModel(null)}><X className="w-5 h-5 text-[#8c877e]" /></button>
-            </div>
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Nome</label>
-              <input type="text" required value={editingModel.name} onChange={(e) => setEditingModel({ ...editingModel, name: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-            </div>
+          <form onSubmit={handleSaveEdit} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4 my-auto">
+            <div className="flex justify-between items-center"><h3 className="font-bold text-[#e4e0d7]">Editar Cadastro</h3><button type="button" onClick={() => setEditingModel(null)}><X className="w-5 h-5 text-[#8c877e]" /></button></div>
+            <div><label className="block text-xs text-[#a39e93] mb-1">Nome</label><input type="text" required value={editingModel.name} onChange={(e) => setEditingModel({ ...editingModel, name: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
             {renderCategorySelector(editingModel.category, (val) => setEditingModel({ ...editingModel, category: val }), 'edit')}
+            <div><label className="block text-xs text-[#a39e93] mb-1">Descrição</label><textarea rows={2} value={editingModel.description} onChange={(e) => setEditingModel({ ...editingModel, description: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
+            <div><label className="block text-xs text-[#a39e93] mb-1">Tags</label><input type="text" value={editingModel.tagsInput} onChange={(e) => setEditingModel({ ...editingModel, tagsInput: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
             <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Descrição</label>
-              <textarea rows={2} value={editingModel.description} onChange={(e) => setEditingModel({ ...editingModel, description: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-            </div>
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Tags (separadas por vírgula)</label>
-              <input type="text" value={editingModel.tagsInput} onChange={(e) => setEditingModel({ ...editingModel, tagsInput: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-            </div>
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Observações</label>
-              <input type="text" value={editingModel.notes} onChange={(e) => setEditingModel({ ...editingModel, notes: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-[#c89d66] mb-1">Alterar Imagem de Referência (Opcional)</label>
-              <input
-                type="file"
-                accept="image/*"
-                onChange={(e) => setEditingModel({ ...editingModel, newImageFile: e.target.files?.[0] || null })}
-                className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]"
-              />
-              {editingModel.newImageFile && <p className="text-[11px] text-[#70a37f] mt-1">Nova imagem: {editingModel.newImageFile.name}</p>}
+              <label className="block text-xs font-semibold text-[#c89d66] mb-1">Alterar Imagem</label>
+              <input type="file" accept="image/*" onChange={(e) => setEditingModel({ ...editingModel, newImageFile: e.target.files?.[0] || null })} className="w-full text-xs text-[#a39e93]" />
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <button type="button" onClick={() => setEditingModel(null)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
-              <button type="submit" disabled={uploading} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">
-                {uploading ? 'Salvando...' : 'Salvar Alterações'}
-              </button>
+              <button type="submit" disabled={uploading} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">Salvar</button>
             </div>
           </form>
         </div>
@@ -2003,57 +1743,30 @@ export default function App() {
             <h3 className="font-bold text-[#e4e0d7]">Excluir "{deleteConfirmModel.name}"?</h3>
             <label className="flex items-start gap-2.5 p-3 rounded-xl bg-[#b94a48]/15 border border-[#b94a48]/30 text-xs text-[#e89b99] cursor-pointer">
               <input type="checkbox" checked={deleteAlsoFromDrive} onChange={(e) => setDeleteAlsoFromDrive(e.target.checked)} className="mt-0.5 accent-[#b94a48]" />
-              <span>Excluir também o arquivo ZIP permanentemente do Google Drive.</span>
+              <span>Excluir também o arquivo ZIP do Google Drive.</span>
             </label>
             <div className="flex justify-end gap-2 pt-2">
               <button onClick={() => setDeleteConfirmModel(null)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
-              <button onClick={handleDeleteModel} disabled={uploading} className="px-4 py-2 bg-[#b94a48] text-white rounded-xl text-xs font-bold cursor-pointer">
-                {uploading ? 'Excluindo...' : 'Confirmar Exclusão'}
-              </button>
+              <button onClick={handleDeleteModel} disabled={uploading} className="px-4 py-2 bg-[#b94a48] text-white rounded-xl text-xs font-bold cursor-pointer">Confirmar</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* MODAL DE IMPORTAÇÃO (COM SUPORTE A IMAGEM DE REFERÊNCIA) */}
       {importingFile && (
         <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 overflow-y-auto">
-          <form onSubmit={handleConfirmImport} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4 my-auto max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center">
-              <h3 className="font-bold text-[#e4e0d7]">Importar ZIP do Drive</h3>
-              <button type="button" onClick={() => setImportingFile(null)}><X className="w-5 h-5 text-[#8c877e]" /></button>
-            </div>
-            <div className="p-2.5 rounded-xl bg-[#000000] border border-[#262522] text-xs text-[#a39e93] truncate">
-              Arquivo: <strong className="text-[#e4e0d7]">{importingFile.name}</strong>
-            </div>
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Nome do Modelo</label>
-              <input type="text" required value={importForm.name} onChange={(e) => setImportForm({ ...importForm, name: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-            </div>
+          <form onSubmit={handleConfirmImport} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4 my-auto">
+            <div className="flex justify-between items-center"><h3 className="font-bold text-[#e4e0d7]">Importar ZIP</h3><button type="button" onClick={() => setImportingFile(null)}><X className="w-5 h-5 text-[#8c877e]" /></button></div>
+            <div><label className="block text-xs text-[#a39e93] mb-1">Nome</label><input type="text" required value={importForm.name} onChange={(e) => setImportForm({ ...importForm, name: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
             {renderCategorySelector(importForm.category, (val) => setImportForm({ ...importForm, category: val }), 'import')}
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Descrição</label>
-              <textarea rows={2} value={importForm.description} onChange={(e) => setImportForm({ ...importForm, description: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-            </div>
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Tags (separadas por vírgula)</label>
-              <input type="text" value={importForm.tags} onChange={(e) => setImportForm({ ...importForm, tags: e.target.value })} placeholder="rpg, stl" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-            </div>
+            <div><label className="block text-xs text-[#a39e93] mb-1">Descrição</label><textarea rows={2} value={importForm.description} onChange={(e) => setImportForm({ ...importForm, description: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
             <div>
               <label className="block text-xs font-semibold text-[#c89d66] mb-1">Imagem de Referência (Opcional)</label>
-              <input
-                type="file"
-                accept="image/*"
-                onChange={(e) => setImportForm({ ...importForm, imageFile: e.target.files?.[0] || null })}
-                className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]"
-              />
-              {importForm.imageFile && <p className="text-[11px] text-[#70a37f] mt-1">Selecionada: {importForm.imageFile.name}</p>}
+              <input type="file" accept="image/*" onChange={(e) => setImportForm({ ...importForm, imageFile: e.target.files?.[0] || null })} className="w-full text-xs text-[#a39e93]" />
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <button type="button" onClick={() => setImportingFile(null)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
-              <button type="submit" disabled={uploading} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">
-                {uploading ? 'Importando...' : 'Confirmar Importação'}
-              </button>
+              <button type="submit" disabled={uploading} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">Importar</button>
             </div>
           </form>
         </div>
@@ -2062,10 +1775,7 @@ export default function App() {
       {folderPickerOpen && (
         <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
           <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-5">
-            <div className="flex justify-between items-center">
-              <h3 className="font-bold text-[#e4e0d7]">Configurar Pasta Raiz no Google Drive</h3>
-              <button onClick={() => setFolderPickerOpen(false)}><X className="w-5 h-5 text-[#8c877e]" /></button>
-            </div>
+            <div className="flex justify-between items-center"><h3 className="font-bold text-[#e4e0d7]">Pasta Raiz no Google Drive</h3><button onClick={() => setFolderPickerOpen(false)}><X className="w-5 h-5 text-[#8c877e]" /></button></div>
             <div className="space-y-2">
               <label className="block text-xs font-semibold text-[#a39e93]">Criar nova pasta:</label>
               <div className="flex gap-2">
@@ -2074,26 +1784,17 @@ export default function App() {
               </div>
             </div>
             <div className="space-y-2">
-              <label className="block text-xs font-semibold text-[#a39e93]">Ou selecione uma pasta existente:</label>
+              <label className="block text-xs font-semibold text-[#a39e93]">Ou selecione:</label>
               <div className="max-h-48 overflow-y-auto divide-y divide-[#1c1b19] bg-[#000000] border border-[#262522] rounded-xl">
                 {driveFolders.map((f) => (
-                  <div
-                    key={f.id}
-                    onClick={() => setPendingFolderSelection(f)}
-                    className={`p-3 flex justify-between text-xs cursor-pointer ${pendingFolderSelection?.id === f.id ? 'bg-[#e4e0d7]/15 text-[#e4e0d7]' : 'hover:bg-[#121211] text-[#a39e93]'}`}
-                  >
-                    <span>{f.name}</span>
-                    <code className="text-[10px] text-[#6e6a61]">{f.id}</code>
+                  <div key={f.id} onClick={() => setPendingFolderSelection(f)} className={`p-3 flex justify-between text-xs cursor-pointer ${pendingFolderSelection?.id === f.id ? 'bg-[#e4e0d7]/15 text-[#e4e0d7]' : 'hover:bg-[#121211] text-[#a39e93]'}`}>
+                    <span>{f.name}</span><code className="text-[10px] text-[#6e6a61]">{f.id}</code>
                   </div>
                 ))}
               </div>
             </div>
             {pendingFolderSelection && (
-              <div className="flex justify-end">
-                <button type="button" onClick={() => saveRootFolderSetting(pendingFolderSelection.id, pendingFolderSelection.name)} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">
-                  Confirmar "{pendingFolderSelection.name}"
-                </button>
-              </div>
+              <div className="flex justify-end"><button type="button" onClick={() => saveRootFolderSetting(pendingFolderSelection.id, pendingFolderSelection.name)} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">Confirmar "{pendingFolderSelection.name}"</button></div>
             )}
           </div>
         </div>
