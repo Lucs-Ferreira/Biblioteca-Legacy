@@ -4,7 +4,7 @@ import {
   Box, Upload, FolderDown, Settings, Search, Plus, ExternalLink,
   Trash2, Edit3, Eye, CheckCircle2, AlertTriangle, Folder,
   HardDrive, ShieldCheck, RefreshCw, X, Check, FileArchive,
-  LogOut, FolderPlus, Tag, Calculator, Menu, Filter
+  LogOut, FolderPlus, Tag, Calculator, Menu, Filter, ArrowRight
 } from 'lucide-react';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
@@ -15,7 +15,9 @@ const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null;
 
-const GOOGLE_SCOPES = 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly email profile';
+// Escopo atualizado para permitir ler os arquivos colocados manualmente em importações/Aguardando,
+// compactá-los em ZIP e mover a pasta original para importações/Importadas
+const GOOGLE_SCOPES = 'https://www.googleapis.com/auth/drive email profile';
 
 const BASE_CATEGORIES = [
   'Geral',
@@ -46,6 +48,19 @@ function formatDate(isoString) {
   } catch {
     return '—';
   }
+}
+
+// Carregador dinâmico do JSZip para compactar pastas no navegador sem precisar instalar pacotes extras no npm
+async function loadJSZip() {
+  if (window.JSZip) return window.JSZip;
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+    script.async = true;
+    script.onload = () => resolve(window.JSZip);
+    script.onerror = () => reject(new Error('Não foi possível carregar o compactador JSZip.'));
+    document.body.appendChild(script);
+  });
 }
 
 export default function App() {
@@ -133,7 +148,13 @@ export default function App() {
   const [uploadStep, setUploadStep] = useState('');
   const [pendingRecovery, setPendingRecovery] = useState(null);
 
-  const [driveZipFiles, setDriveZipFiles] = useState([]);
+  // Estados do Novo Fluxo de Importação (importações/Aguardando -> Compactar ZIP -> importações/Importadas)
+  const [importPipelineIds, setImportPipelineIds] = useState({
+    importacoesId: '',
+    aguardandoId: '',
+    importadasId: ''
+  });
+  const [awaitingItems, setAwaitingItems] = useState([]);
   const [loadingDriveZips, setLoadingDriveZips] = useState(false);
   const [importingFile, setImportingFile] = useState(null);
   const [importForm, setImportForm] = useState({
@@ -233,6 +254,8 @@ export default function App() {
     script.async = true;
     script.defer = true;
     document.body.appendChild(script);
+    // Pré-carrega o JSZip em background
+    loadJSZip().catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -430,7 +453,7 @@ export default function App() {
     });
 
     tokenClientRef.current = tokenClient;
-    tokenClient.requestAccessToken({ prompt: '' });
+    tokenClient.requestAccessToken({ prompt: 'consent' });
   };
 
   const handleDisconnectGoogle = async () => {
@@ -451,6 +474,67 @@ export default function App() {
         });
     }
     showToast('Conta Google desconectada.');
+  };
+
+  // ============================================================================
+  // FUNÇÃO GENÉRICA PARA GARANTIR QUALQUER SUBPASTA NO DRIVE
+  // ============================================================================
+  const ensureSpecificSubfolderInDrive = async (folderName, parentId) => {
+    if (!parentId || !folderName) return parentId;
+    const trimmed = folderName.trim();
+    const safeName = trimmed.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const q = encodeURIComponent(
+      `mimeType = 'application/vnd.google-apps.folder' and name = '${safeName}' and '${parentId}' in parents and trashed = false`
+    );
+
+    const searchRes = await googleDriveFetch(
+      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`
+    );
+    if (searchRes.ok) {
+      const searchData = await searchRes.json();
+      if (searchData.files?.length > 0) {
+        return searchData.files[0].id;
+      }
+    }
+
+    const createRes = await googleDriveFetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: trimmed,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [parentId]
+      })
+    });
+
+    if (!createRes.ok) {
+      const errBody = await createRes.json().catch(() => ({}));
+      throw new Error(errBody?.error?.message || `Não foi possível criar a pasta "${trimmed}".`);
+    }
+    const created = await createRes.json();
+    return created.id;
+  };
+
+  // Garante a árvore: Pasta Raiz -> importações -> Aguardando & Importadas
+  const ensureImportPipelineFolders = async (rootIdOverride) => {
+    const rootId = rootIdOverride || settings.root_folder_id;
+    if (!rootId) throw new Error('Pasta raiz não configurada.');
+
+    if (
+      importPipelineIds.importacoesId &&
+      importPipelineIds.aguardandoId &&
+      importPipelineIds.importadasId
+    ) {
+      return importPipelineIds;
+    }
+
+    const importacoesId = await ensureSpecificSubfolderInDrive('importações', rootId);
+    const aguardandoId = await ensureSpecificSubfolderInDrive('Aguardando', importacoesId);
+    const importadasId = await ensureSpecificSubfolderInDrive('Importadas', importacoesId);
+
+    const ids = { importacoesId, aguardandoId, importadasId };
+    setImportPipelineIds(ids);
+    return ids;
   };
 
   const fetchRootSubfolders = async (rootIdOverride) => {
@@ -489,41 +573,12 @@ export default function App() {
       return foundCached.id;
     }
 
-    const safeName = trimmedCategory.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-    const q = encodeURIComponent(
-      `mimeType = 'application/vnd.google-apps.folder' and name = '${safeName}' and '${rootId}' in parents and trashed = false`
-    );
-
-    const searchRes = await googleDriveFetch(
-      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`
-    );
-
-    if (searchRes.ok) {
-      const searchData = await searchRes.json();
-      if (searchData.files?.length > 0) {
-        return searchData.files[0].id;
-      }
-    }
-
-    const createRes = await googleDriveFetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: trimmedCategory,
-        mimeType: 'application/vnd.google-apps.folder',
-        parents: [rootId]
-      })
+    const createdId = await ensureSpecificSubfolderInDrive(trimmedCategory, rootId);
+    setExistingSubfolders((prev) => {
+      if (prev.some((p) => p.id === createdId)) return prev;
+      return [...prev, { id: createdId, name: trimmedCategory }];
     });
-
-    if (!createRes.ok) {
-      const errBody = await createRes.json().catch(() => ({}));
-      throw new Error(
-        errBody?.error?.message || `Não foi possível criar a subpasta "${trimmedCategory}" no Google Drive.`
-      );
-    }
-    const created = await createRes.json();
-    setExistingSubfolders((prev) => [...prev, created]);
-    return created.id;
+    return createdId;
   };
 
   const handleSyncAllCategorySubfolders = async (rootIdOverride, silent = false) => {
@@ -548,12 +603,15 @@ export default function App() {
         }
       }
 
+      // Também garante a estrutura importações/Aguardando e importações/Importadas
+      await ensureImportPipelineFolders(rootId);
+
       await fetchRootSubfolders(rootId);
       if (!silent || createdCount > 0) {
         showToast(
           createdCount > 0
-            ? `${createdCount} subpasta(s) de categoria criada(s) com sucesso!`
-            : `Todas as subpastas de categorias estão montadas no Google Drive!`
+            ? `${createdCount} subpasta(s) e estrutura de importações criadas com sucesso!`
+            : `Todas as subpastas de categorias e a pasta importações/Aguardando estão prontas!`
         );
       }
     } catch (err) {
@@ -733,6 +791,7 @@ export default function App() {
       return;
     }
     setSettings(updated);
+    setImportPipelineIds({ importacoesId: '', aguardandoId: '', importadasId: '' });
     setPendingFolderSelection(null);
     setFolderPickerOpen(false);
     showToast(`Pasta raiz "${folderName}" vinculada! Montando subpastas...`);
@@ -908,41 +967,21 @@ export default function App() {
     }
   };
 
-  const fetchExistingDriveZips = async () => {
+  // ============================================================================
+  // NOVO FLUXO DE IMPORTAÇÃO: importações/Aguardando -> Compactar ZIP -> importações/Importadas
+  // ============================================================================
+  const fetchAwaitingImports = async () => {
     if (!settings.root_folder_id) return;
     setLoadingDriveZips(true);
     try {
-      const subFolders = await fetchRootSubfolders(settings.root_folder_id);
-
-      const folderMap = { [settings.root_folder_id]: 'Pasta Raiz' };
-      subFolders.forEach((sf) => {
-        folderMap[sf.id] = sf.name;
-      });
-
-      const allParentIds = [settings.root_folder_id, ...subFolders.map((f) => f.id)];
-      const parentsCondition = allParentIds.map((id) => `'${id}' in parents`).join(' or ');
-
-      const zipsQ = encodeURIComponent(
-        `(${parentsCondition}) and (mimeType = 'application/zip' or mimeType = 'application/x-zip-compressed' or name contains '.zip') and trashed = false`
-      );
+      const pipeline = await ensureImportPipelineFolders(settings.root_folder_id);
+      const q = encodeURIComponent(`'${pipeline.aguardandoId}' in parents and trashed = false`);
       const res = await googleDriveFetch(
-        `https://www.googleapis.com/drive/v3/files?q=${zipsQ}&fields=files(id,name,size,createdTime,webViewLink,parents)&pageSize=100`
+        `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,size,createdTime,webViewLink,parents)&pageSize=100`
       );
-      if (!res.ok) throw new Error('Erro ao listar arquivos ZIP do Google Drive.');
+      if (!res.ok) throw new Error('Erro ao listar itens da pasta importações/Aguardando.');
       const data = await res.json();
-
-      const enrichedFiles = (data.files || []).map((file) => {
-        const parentId = file.parents?.[0] || settings.root_folder_id;
-        const folderLabel = folderMap[parentId] || 'Pasta Raiz';
-        return {
-          ...file,
-          detectedFolderId: parentId,
-          detectedCategory: folderLabel !== 'Pasta Raiz' ? folderLabel : 'Geral',
-          folderLabel
-        };
-      });
-
-      setDriveZipFiles(enrichedFiles);
+      setAwaitingItems(data.files || []);
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -952,25 +991,151 @@ export default function App() {
 
   useEffect(() => {
     if (activeTab === 'importar' && googleConnected && settings.root_folder_id) {
-      fetchExistingDriveZips();
+      fetchAwaitingImports();
     }
   }, [activeTab, googleConnected, settings.root_folder_id]);
+
+  // Lê recursivamente todos os arquivos de uma pasta do Google Drive e adiciona ao objeto JSZip
+  const addDriveFolderToZipRecursively = async (folderId, zipFolderInstance, statusPrefix = '') => {
+    const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
+    const res = await googleDriveFetch(
+      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,size)&pageSize=200`
+    );
+    if (!res.ok) throw new Error('Falha ao ler conteúdo da pasta para compactação.');
+    const data = await res.json();
+    const children = data.files || [];
+
+    let count = 0;
+    for (const child of children) {
+      if (child.mimeType === 'application/vnd.google-apps.folder') {
+        const subZip = zipFolderInstance.folder(child.name);
+        count += await addDriveFolderToZipRecursively(child.id, subZip, `${statusPrefix}${child.name}/`);
+      } else if (!child.mimeType.startsWith('application/vnd.google-apps.')) {
+        setUploadStep(`Baixando arquivo para compactar: ${statusPrefix}${child.name}...`);
+        const fileRes = await googleDriveFetch(
+          `https://www.googleapis.com/drive/v3/files/${child.id}?alt=media`
+        );
+        if (!fileRes.ok) {
+          throw new Error(`Não foi possível ler o arquivo "${child.name}". Verifique a autorização do Google Drive.`);
+        }
+        const blob = await fileRes.blob();
+        zipFolderInstance.file(child.name, blob);
+        count++;
+      }
+    }
+    return count;
+  };
 
   const handleConfirmImport = async (e) => {
     e.preventDefault();
     if (!importingFile) return;
 
-    if (models.some((m) => m.drive_file_id === importingFile.id)) {
-      showToast('Este arquivo ZIP já está cadastrado.', 'error');
-      return;
-    }
-
     setUploading(true);
     try {
-      const targetFolderId = importingFile.detectedFolderId || settings.root_folder_id;
-      await completeDatabaseRegistration(importingFile, targetFolderId, importForm);
-      showToast(`Arquivo "${importingFile.name}" importado!`);
+      const pipeline = await ensureImportPipelineFolders(settings.root_folder_id);
+      const targetCategoryFolderId = await getTargetUploadFolderId(importForm.category);
+
+      let zipBlobToUpload = null;
+      const baseCleanName = (importForm.name.trim() || importingFile.name).replace(/\.zip$/i, '');
+      const finalZipFileName = `${baseCleanName}.zip`;
+
+      const isFolder = importingFile.mimeType === 'application/vnd.google-apps.folder';
+      const isAlreadyZip =
+        !isFolder &&
+        (importingFile.mimeType === 'application/zip' ||
+          importingFile.mimeType === 'application/x-zip-compressed' ||
+          importingFile.name.toLowerCase().endsWith('.zip'));
+
+      if (isFolder) {
+        // 1. Compacta todos os arquivos da pasta em um único arquivo .ZIP
+        setUploadStep(`Carregando compactador e lendo a pasta "${importingFile.name}"...`);
+        const JSZip = await loadJSZip();
+        const zip = new JSZip();
+
+        const filesAdded = await addDriveFolderToZipRecursively(importingFile.id, zip);
+        if (filesAdded === 0) {
+          throw new Error(`A pasta "${importingFile.name}" está vazia! Coloque os arquivos STL dentro dela antes de importar.`);
+        }
+
+        setUploadStep(`Compactando ${filesAdded} arquivo(s) em "${finalZipFileName}"...`);
+        zipBlobToUpload = await zip.generateAsync({
+          type: 'blob',
+          compression: 'DEFLATE',
+          compressionOptions: { level: 6 }
+        });
+      } else if (isAlreadyZip) {
+        // Caso o usuário tenha colocado um arquivo .ZIP direto na pasta Aguardando
+        setUploadStep(`Lendo arquivo ZIP "${importingFile.name}"...`);
+        const fileRes = await googleDriveFetch(
+          `https://www.googleapis.com/drive/v3/files/${importingFile.id}?alt=media`
+        );
+        if (!fileRes.ok) throw new Error('Não foi possível ler o arquivo ZIP de Aguardando.');
+        zipBlobToUpload = await fileRes.blob();
+      } else {
+        // Caso seja um arquivo avulso (.stl, .obj, etc.), compacta em .ZIP
+        setUploadStep(`Compactando arquivo "${importingFile.name}" em .ZIP...`);
+        const JSZip = await loadJSZip();
+        const zip = new JSZip();
+        const fileRes = await googleDriveFetch(
+          `https://www.googleapis.com/drive/v3/files/${importingFile.id}?alt=media`
+        );
+        if (!fileRes.ok) throw new Error(`Não foi possível ler o arquivo "${importingFile.name}".`);
+        const fileBlob = await fileRes.blob();
+        zip.file(importingFile.name, fileBlob);
+        zipBlobToUpload = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+      }
+
+      // 2. Salva o novo .ZIP compactado dentro da pasta da Categoria escolhida
+      setUploadStep(`Salvando "${finalZipFileName}" na pasta da categoria "${importForm.category}"...`);
+      const metadata = {
+        name: finalZipFileName,
+        parents: [targetCategoryFolderId],
+        mimeType: 'application/zip'
+      };
+      const formData = new FormData();
+      formData.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+      formData.append('file', zipBlobToUpload, finalZipFileName);
+
+      const uploadRes = await googleDriveFetch(
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,size,webViewLink',
+        { method: 'POST', body: formData }
+      );
+      if (!uploadRes.ok) {
+        throw new Error('Falha ao salvar o arquivo ZIP compactado na pasta da categoria.');
+      }
+      const uploadedZipData = await uploadRes.json();
+
+      // 3. Registra os metadados e a imagem de referência no Supabase
+      await completeDatabaseRegistration(uploadedZipData, targetCategoryFolderId, {
+        ...importForm,
+        zipFile: { size: zipBlobToUpload.size }
+      });
+
+      // 4. Move a pasta/arquivo original de importações/Aguardando para importações/Importadas
+      setUploadStep(`Movendo "${importingFile.name}" para importações/Importadas...`);
+      const currentParent = importingFile.parents?.[0] || pipeline.aguardandoId;
+      const moveRes = await googleDriveFetch(
+        `https://www.googleapis.com/drive/v3/files/${importingFile.id}?addParents=${pipeline.importadasId}&removeParents=${currentParent}&fields=id,parents`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        }
+      );
+
+      if (!moveRes.ok) {
+        showToast(
+          `ZIP salvo na categoria "${importForm.category}", mas o Google Drive não permitiu mover a pasta original automaticamente.`,
+          'error'
+        );
+      } else {
+        showToast(
+          `Sucesso! Compactado em "${ importForm.category }" e pasta original movida para importações/Importadas!`
+        );
+      }
+
       setImportingFile(null);
+      fetchAwaitingImports();
       loadUserData();
     } catch (err) {
       showToast(err.message, 'error');
@@ -1081,10 +1246,7 @@ export default function App() {
 
           if (!trashRes.ok) {
             const errData = await trashRes.json().catch(() => ({}));
-            throw new Error(
-              errData?.error?.message ||
-                'O escopo drive.file permite excluir pelo app apenas arquivos enviados pelo próprio app.'
-            );
+            throw new Error(errData?.error?.message || 'Não foi possível excluir o arquivo no Drive.');
           }
         }
       }
@@ -1384,7 +1546,6 @@ export default function App() {
               <Settings className="w-4 h-4" /><span>Configurações</span>
             </button>
 
-            {/* BOTÃO DE LOGOFF NO HEADER DESKTOP */}
             <button
               onClick={() => supabase.auth.signOut()}
               className="ml-2 px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 hover:bg-[#b94a48]/25 transition cursor-pointer"
@@ -1403,7 +1564,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Menu Suspenso Mobile (Incluindo Logoff) */}
+        {/* Menu Suspenso Mobile */}
         {mobileMenuOpen && (
           <div className="md:hidden bg-[#0a0a0a] border-b border-[#262522] px-4 py-3 space-y-2">
             <button onClick={() => { setActiveTab('catalogo'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
@@ -1413,7 +1574,7 @@ export default function App() {
               <Upload className="w-4 h-4" /><span>Enviar ZIP</span>
             </button>
             <button onClick={() => { setActiveTab('importar'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'importar' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
-              <FolderDown className="w-4 h-4" /><span>Importar do Drive</span>
+              <FolderDown className="w-4 h-4" /><span>Importar (Aguardando)</span>
             </button>
             <button onClick={() => { setActiveTab('calculadora'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'calculadora' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
               <Calculator className="w-4 h-4" /><span>Calculadora de Gastos</span>
@@ -1421,8 +1582,6 @@ export default function App() {
             <button onClick={() => { setActiveTab('configuracoes'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
               <Settings className="w-4 h-4" /><span>Configurações</span>
             </button>
-
-            {/* BOTÃO DE LOGOFF NO MENU MOBILE */}
             <button
               onClick={() => { setMobileMenuOpen(false); supabase.auth.signOut(); }}
               className="w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30"
@@ -1456,9 +1615,7 @@ export default function App() {
       <main className="max-w-7xl mx-auto w-full px-3 sm:px-6 py-6 sm:py-8 flex-1">
         {activeTab === 'catalogo' && (
           <div className="space-y-6">
-            {/* Barra de Pesquisa Expandível e Botão Seletor de Categoria Organizado */}
             <div className="flex flex-col md:flex-row gap-4 items-stretch md:items-center justify-between bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
-              {/* Barra de Pesquisa com Transição Suave ao Clicar */}
               <div className="relative w-full md:w-64 focus-within:md:w-96 transition-all duration-300">
                 <Search className="w-4 h-4 text-[#8c877e] absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
@@ -1470,7 +1627,6 @@ export default function App() {
                 />
               </div>
 
-              {/* Seletor de Filtro de Categoria Elegante */}
               <div className="flex items-center gap-2.5 w-full md:w-auto">
                 <div className="flex items-center gap-2 text-xs text-[#a39e93] font-medium shrink-0">
                   <Filter className="w-4 h-4 text-[#c89d66]" />
@@ -1498,11 +1654,11 @@ export default function App() {
                 <FileArchive className="w-12 h-12 text-[#5e5a52] mx-auto" />
                 <div className="space-y-1">
                   <h3 className="text-base font-semibold text-[#e4e0d7]">Nenhum modelo STL encontrado</h3>
-                  <p className="text-xs text-[#8c877e] max-w-md mx-auto">Envie um novo arquivo ZIP ou importe arquivos já existentes.</p>
+                  <p className="text-xs text-[#8c877e] max-w-md mx-auto">Envie um novo arquivo ZIP ou importe pastas de importações/Aguardando.</p>
                 </div>
                 <div className="flex flex-wrap justify-center gap-3 pt-2">
                   <button onClick={() => setActiveTab('upload')} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold transition cursor-pointer">Enviar Novo ZIP</button>
-                  <button onClick={() => setActiveTab('importar')} className="px-4 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold transition cursor-pointer">Importar do Drive</button>
+                  <button onClick={() => setActiveTab('importar')} className="px-4 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold transition cursor-pointer">Importar de Aguardando</button>
                 </div>
               </div>
             ) : (
@@ -1564,11 +1720,11 @@ export default function App() {
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Tags (vírgula)</label>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Tags (separadas por vírgula)</label>
                   <input type="text" value={uploadForm.tags} onChange={(e) => setUploadForm({ ...uploadForm, tags: e.target.value })} placeholder="rpg, stl" className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Observações</label>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Observações de Impressão</label>
                   <input type="text" value={uploadForm.notes} onChange={(e) => setUploadForm({ ...uploadForm, notes: e.target.value })} placeholder="PLA 205°C" className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
                 </div>
               </div>
@@ -1594,63 +1750,122 @@ export default function App() {
           </div>
         )}
 
+        {/* ABA IMPORTAR: Fluxo importações/Aguardando -> Compactar ZIP -> Categoria -> importações/Importadas */}
         {activeTab === 'importar' && (
           <div className="space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
-              <div>
-                <h2 className="text-base sm:text-lg font-bold text-[#e4e0d7]">Importar ZIPs Existentes</h2>
-                <p className="text-xs text-[#8c877e] mt-0.5">Reconhece arquivos .ZIP na pasta raiz e subpastas.</p>
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
+              <div className="space-y-1">
+                <h2 className="text-base sm:text-lg font-bold text-[#e4e0d7]">
+                  Fila de Importação (<code className="text-[#c89d66]">importações/Aguardando</code>)
+                </h2>
+                <p className="text-xs text-[#8c877e]">
+                  Coloque suas pastas de modelos dentro de <strong className="text-[#e4e0d7]">importações/Aguardando</strong>. Ao cadastrar, o sistema compacta a pasta em <strong>.ZIP</strong>, salva na categoria escolhida e move a pasta original para <strong className="text-[#e4e0d7]">importações/Importadas</strong>.
+                </p>
               </div>
-              <button onClick={fetchExistingDriveZips} disabled={loadingDriveZips} className="px-4 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer">
-                <RefreshCw className={`w-4 h-4 ${loadingDriveZips ? 'animate-spin' : ''}`} /><span>Atualizar Lista</span>
-              </button>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {importPipelineIds.aguardandoId && (
+                  <a
+                    href={`https://drive.google.com/drive/folders/${importPipelineIds.aguardandoId}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-3.5 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold inline-flex items-center gap-1.5"
+                  >
+                    <Folder className="w-3.5 h-3.5 text-[#c89d66]" />
+                    <span>Abrir "Aguardando" no Drive</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+                {importPipelineIds.importadasId && (
+                  <a
+                    href={`https://drive.google.com/drive/folders/${importPipelineIds.importadasId}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-3.5 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#a39e93] border border-[#262522] rounded-xl text-xs font-semibold inline-flex items-center gap-1.5"
+                  >
+                    <span>Ver "Importadas"</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+                <button
+                  onClick={fetchAwaitingImports}
+                  disabled={loadingDriveZips}
+                  className="px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <RefreshCw className={`w-4 h-4 ${loadingDriveZips ? 'animate-spin' : ''}`} />
+                  <span>Atualizar Fila</span>
+                </button>
+              </div>
             </div>
+
             {!settings.root_folder_id ? (
-              <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 text-center text-sm text-[#8c877e]">Conecte o Google e selecione a pasta raiz.</div>
+              <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 text-center text-sm text-[#8c877e]">
+                Conecte o Google e selecione a pasta raiz.
+              </div>
             ) : loadingDriveZips ? (
-              <div className="py-16 text-center text-[#a39e93] flex flex-col items-center gap-2"><RefreshCw className="w-6 h-6 animate-spin text-[#e4e0d7]" /><span className="text-xs">Buscando no Drive...</span></div>
-            ) : driveZipFiles.length === 0 ? (
-              <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 text-center text-sm text-[#8c877e]">Nenhum arquivo .ZIP encontrado.</div>
+              <div className="py-16 text-center text-[#a39e93] flex flex-col items-center gap-2">
+                <RefreshCw className="w-6 h-6 animate-spin text-[#e4e0d7]" />
+                <span className="text-xs">Verificando pastas em importações/Aguardando...</span>
+              </div>
+            ) : awaitingItems.length === 0 ? (
+              <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 text-center space-y-3">
+                <Folder className="w-10 h-10 text-[#5e5a52] mx-auto" />
+                <p className="text-sm text-[#e4e0d7] font-semibold">Nenhuma pasta aguardando importação</p>
+                <p className="text-xs text-[#8c877e] max-w-md mx-auto">
+                  Clique em <strong>"Abrir Aguardando no Drive"</strong> acima, solte suas pastas com arquivos STL lá dentro e clique em <strong>Atualizar Fila</strong>.
+                </p>
+              </div>
             ) : (
               <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl overflow-x-auto">
                 <table className="w-full text-left border-collapse text-sm min-w-[640px]">
                   <thead>
                     <tr className="border-b border-[#262522] text-xs text-[#8c877e] bg-[#000000]">
-                      <th className="py-3.5 px-4">Arquivo ZIP</th>
-                      <th className="py-3.5 px-4">Local</th>
-                      <th className="py-3.5 px-4">Tamanho</th>
+                      <th className="py-3.5 px-4">Pasta / Item em Aguardando</th>
+                      <th className="py-3.5 px-4">Tipo</th>
+                      <th className="py-3.5 px-4">Fluxo Automático</th>
                       <th className="py-3.5 px-4 text-right">Ação</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#1c1b19]">
-                    {driveZipFiles.map((df) => {
-                      const alreadyRegistered = models.some((m) => m.drive_file_id === df.id);
+                    {awaitingItems.map((item) => {
+                      const isFolder = item.mimeType === 'application/vnd.google-apps.folder';
                       return (
-                        <tr key={df.id} className="hover:bg-[#121211]">
-                          <td className="py-3.5 px-4 font-medium text-[#e4e0d7] flex items-center gap-2.5"><FileArchive className="w-4 h-4 text-[#c89d66] shrink-0" /><span className="truncate max-w-xs">{df.name}</span></td>
-                          <td className="py-3.5 px-4 text-xs text-[#a39e93]"><span className="px-2 py-0.5 rounded bg-[#141413] border border-[#262522]">{df.folderLabel}</span></td>
-                          <td className="py-3.5 px-4 text-xs text-[#8c877e]">{formatBytes(df.size)}</td>
-                          <td className="py-3.5 px-4 text-right">
-                            {alreadyRegistered ? (
-                              <span className="text-xs text-[#70a37f]">Cadastrado</span>
+                        <tr key={item.id} className="hover:bg-[#121211]">
+                          <td className="py-3.5 px-4 font-medium text-[#e4e0d7] flex items-center gap-2.5">
+                            {isFolder ? (
+                              <Folder className="w-4 h-4 text-[#c89d66] shrink-0" />
                             ) : (
-                              <button
-                                onClick={() => {
-                                  setImportingFile(df);
-                                  setImportForm({
-                                    name: df.name.replace(/\.zip$/i, ''),
-                                    description: '',
-                                    category: df.detectedCategory || 'Geral',
-                                    tags: '',
-                                    notes: '',
-                                    imageFile: null
-                                  });
-                                }}
-                                className="px-3.5 py-1.5 bg-[#e4e0d7] text-[#000000] rounded-lg text-xs font-bold cursor-pointer"
-                              >
-                                Importar
-                              </button>
+                              <FileArchive className="w-4 h-4 text-[#e4e0d7] shrink-0" />
                             )}
+                            <span className="truncate max-w-xs">{item.name}</span>
+                          </td>
+                          <td className="py-3.5 px-4 text-xs text-[#a39e93]">
+                            <span className="px-2 py-0.5 rounded bg-[#141413] border border-[#262522]">
+                              {isFolder ? 'Pasta de Arquivos' : `Arquivo (${formatBytes(item.size)})`}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4 text-xs text-[#8c877e]">
+                            <span className="inline-flex items-center gap-1">
+                              Compactar .ZIP <ArrowRight className="w-3 h-3 text-[#c89d66]" /> Salvar na Categoria <ArrowRight className="w-3 h-3 text-[#c89d66]" /> Mover p/ Importadas
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4 text-right">
+                            <button
+                              onClick={() => {
+                                setImportingFile(item);
+                                setImportForm({
+                                  name: item.name.replace(/\.zip$/i, ''),
+                                  description: '',
+                                  category: 'Geral',
+                                  tags: '',
+                                  notes: '',
+                                  imageFile: null
+                                });
+                              }}
+                              className="px-3.5 py-1.5 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-lg text-xs font-bold cursor-pointer transition"
+                            >
+                              Cadastrar e Compactar
+                            </button>
                           </td>
                         </tr>
                       );
@@ -1961,6 +2176,11 @@ export default function App() {
                 <span className="text-xs text-[#8c877e]">{formatBytes(selectedModel.drive_file_size)}</span>
               </div>
               <p className="text-sm text-[#d5d0c5]">{selectedModel.description || 'Sem descrição.'}</p>
+              {selectedModel.notes && (
+                <div className="p-3 rounded-xl bg-[#000000] border border-[#262522] text-xs text-[#a39e93]">
+                  <strong className="text-[#e4e0d7]">Observações:</strong> {selectedModel.notes}
+                </div>
+              )}
               <div className="flex justify-between pt-2 border-t border-[#1c1b19]">
                 <a href={selectedModel.drive_file_url} target="_blank" rel="noreferrer" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold inline-flex items-center gap-2"><ExternalLink className="w-4 h-4" /> Abrir ZIP no Drive</a>
                 <div className="flex gap-2">
@@ -1986,7 +2206,8 @@ export default function App() {
             <div><label className="block text-xs text-[#a39e93] mb-1">Nome</label><input type="text" required value={editingModel.name} onChange={(e) => setEditingModel({ ...editingModel, name: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
             {renderCategorySelector(editingModel.category, (val) => setEditingModel({ ...editingModel, category: val }), 'edit')}
             <div><label className="block text-xs text-[#a39e93] mb-1">Descrição</label><textarea rows={2} value={editingModel.description} onChange={(e) => setEditingModel({ ...editingModel, description: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
-            <div><label className="block text-xs text-[#a39e93] mb-1">Tags</label><input type="text" value={editingModel.tagsInput} onChange={(e) => setEditingModel({ ...editingModel, tagsInput: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
+            <div><label className="block text-xs text-[#a39e93] mb-1">Tags (separadas por vírgula)</label><input type="text" value={editingModel.tagsInput} onChange={(e) => setEditingModel({ ...editingModel, tagsInput: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
+            <div><label className="block text-xs text-[#a39e93] mb-1">Observações de Impressão</label><input type="text" value={editingModel.notes || ''} onChange={(e) => setEditingModel({ ...editingModel, notes: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
             <div>
               <label className="block text-xs font-semibold text-[#c89d66] mb-1">Alterar Imagem</label>
               <input type="file" accept="image/*" onChange={(e) => setEditingModel({ ...editingModel, newImageFile: e.target.files?.[0] || null })} className="w-full text-xs text-[#a39e93]" />
@@ -2015,20 +2236,110 @@ export default function App() {
         </div>
       )}
 
+      {/* MODAL DE IMPORTAÇÃO COMPLETO (IDÊNTICO AO DE ENVIO: Nome, Categoria, Descrição, Tags, Observações e Imagem) */}
       {importingFile && (
         <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 overflow-y-auto">
-          <form onSubmit={handleConfirmImport} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4 my-auto">
-            <div className="flex justify-between items-center"><h3 className="font-bold text-[#e4e0d7]">Importar ZIP</h3><button type="button" onClick={() => setImportingFile(null)}><X className="w-5 h-5 text-[#8c877e]" /></button></div>
-            <div><label className="block text-xs text-[#a39e93] mb-1">Nome</label><input type="text" required value={importForm.name} onChange={(e) => setImportForm({ ...importForm, name: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
-            {renderCategorySelector(importForm.category, (val) => setImportForm({ ...importForm, category: val }), 'import')}
-            <div><label className="block text-xs text-[#a39e93] mb-1">Descrição</label><textarea rows={2} value={importForm.description} onChange={(e) => setImportForm({ ...importForm, description: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
-            <div>
-              <label className="block text-xs font-semibold text-[#c89d66] mb-1">Imagem de Referência (Opcional)</label>
-              <input type="file" accept="image/*" onChange={(e) => setImportForm({ ...importForm, imageFile: e.target.files?.[0] || null })} className="w-full text-xs text-[#a39e93]" />
+          <form onSubmit={handleConfirmImport} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-xl w-full p-6 space-y-4 my-auto max-h-[92vh] overflow-y-auto">
+            <div className="flex justify-between items-center">
+              <div>
+                <h3 className="font-bold text-[#e4e0d7] text-base">Cadastrar e Compactar de Aguardando</h3>
+                <p className="text-[11px] text-[#8c877e]">
+                  Compacta em .ZIP &rarr; Salva na Categoria &rarr; Move original para importações/Importadas
+                </p>
+              </div>
+              <button type="button" onClick={() => setImportingFile(null)} disabled={uploading}>
+                <X className="w-5 h-5 text-[#8c877e]" />
+              </button>
             </div>
+
+            <div className="p-3 rounded-xl bg-[#000000] border border-[#262522] text-xs text-[#a39e93] flex items-center gap-2">
+              <Folder className="w-4 h-4 text-[#c89d66] shrink-0" />
+              <span className="truncate">Selecionado em Aguardando: <strong className="text-[#e4e0d7]">{importingFile.name}</strong></span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-[#a39e93] mb-1">Nome do Modelo *</label>
+                <input
+                  type="text"
+                  required
+                  value={importForm.name}
+                  onChange={(e) => setImportForm({ ...importForm, name: e.target.value })}
+                  placeholder="Ex: Dragão Articulado"
+                  className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
+                />
+              </div>
+              {renderCategorySelector(importForm.category, (val) => setImportForm({ ...importForm, category: val }), 'import')}
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-[#a39e93] mb-1">Descrição</label>
+              <textarea
+                rows={2}
+                value={importForm.description}
+                onChange={(e) => setImportForm({ ...importForm, description: e.target.value })}
+                placeholder="Detalhes das peças, escala recomendada, suporte..."
+                className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-[#a39e93] mb-1">Tags (separadas por vírgula)</label>
+                <input
+                  type="text"
+                  value={importForm.tags}
+                  onChange={(e) => setImportForm({ ...importForm, tags: e.target.value })}
+                  placeholder="rpg, dragao, sem-suporte"
+                  className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-[#a39e93] mb-1">Observações de Impressão</label>
+                <input
+                  type="text"
+                  value={importForm.notes}
+                  onChange={(e) => setImportForm({ ...importForm, notes: e.target.value })}
+                  placeholder="PLA 205°C, preenchimento 15%"
+                  className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
+                />
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-[#000000] border border-dashed border-[#383632] space-y-2">
+              <label className="block text-xs font-semibold text-[#c89d66]">Imagem de Referência (Supabase Privado)</label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => setImportForm({ ...importForm, imageFile: e.target.files?.[0] || null })}
+                className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]"
+              />
+              {importForm.imageFile && <p className="text-[11px] text-[#70a37f] truncate">Selecionada: {importForm.imageFile.name}</p>}
+            </div>
+
+            {uploading && (
+              <div className="p-3 rounded-xl bg-[#141413] border border-[#e4e0d7]/30 flex items-center gap-3 text-xs text-[#e4e0d7]">
+                <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
+                <span>{uploadStep || 'Compactando e movendo pasta...'}</span>
+              </div>
+            )}
+
             <div className="flex justify-end gap-2 pt-2">
-              <button type="button" onClick={() => setImportingFile(null)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
-              <button type="submit" disabled={uploading} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">Importar</button>
+              <button
+                type="button"
+                disabled={uploading}
+                onClick={() => setImportingFile(null)}
+                className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={uploading}
+                className="px-5 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] disabled:opacity-50 text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
+              >
+                {uploading ? 'Processando...' : 'Compactar ZIP, Salvar e Mover'}
+              </button>
             </div>
           </form>
         </div>
