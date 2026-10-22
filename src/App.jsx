@@ -1116,7 +1116,6 @@ export default function App() {
     }
   };
 
-  // Funções da Calculadora
   const handleSaveMaterial = async (e) => {
     e.preventDefault();
     if (!supabase || !session?.user) return;
@@ -1384,6 +1383,16 @@ export default function App() {
             <button onClick={() => setActiveTab('configuracoes')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
               <Settings className="w-4 h-4" /><span>Configurações</span>
             </button>
+
+            {/* BOTÃO DE LOGOFF NO HEADER DESKTOP */}
+            <button
+              onClick={() => supabase.auth.signOut()}
+              className="ml-2 px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 hover:bg-[#b94a48]/25 transition cursor-pointer"
+              title="Sair da Conta"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>Sair</span>
+            </button>
           </nav>
 
           {/* Botão Hambúrguer Mobile */}
@@ -1394,7 +1403,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Menu Suspenso Mobile */}
+        {/* Menu Suspenso Mobile (Incluindo Logoff) */}
         {mobileMenuOpen && (
           <div className="md:hidden bg-[#0a0a0a] border-b border-[#262522] px-4 py-3 space-y-2">
             <button onClick={() => { setActiveTab('catalogo'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
@@ -1411,6 +1420,14 @@ export default function App() {
             </button>
             <button onClick={() => { setActiveTab('configuracoes'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
               <Settings className="w-4 h-4" /><span>Configurações</span>
+            </button>
+
+            {/* BOTÃO DE LOGOFF NO MENU MOBILE */}
+            <button
+              onClick={() => { setMobileMenuOpen(false); supabase.auth.signOut(); }}
+              className="w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30"
+            >
+              <LogOut className="w-4 h-4" /><span>Sair da Conta (Logoff)</span>
             </button>
           </div>
         )}
