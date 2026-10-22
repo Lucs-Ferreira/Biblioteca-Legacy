@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import {
   Box, Upload, FolderDown, Settings, Search, Plus, ExternalLink,
   Trash2, Edit3, Eye, CheckCircle2, AlertTriangle, Folder,
   HardDrive, ShieldCheck, RefreshCw, X, Check, FileArchive,
-  LogOut, FolderPlus, Tag, Calculator, Menu, Filter, ArrowRight
+  LogOut, FolderPlus, Tag, Calculator, Menu, Filter, ArrowRight,
+  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight
 } from 'lucide-react';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
@@ -15,8 +16,6 @@ const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null;
 
-// Escopo atualizado para permitir ler os arquivos colocados manualmente em importações/Aguardando,
-// compactá-los em ZIP e mover a pasta original para importações/Importadas
 const GOOGLE_SCOPES = 'https://www.googleapis.com/auth/drive email profile';
 
 const BASE_CATEGORIES = [
@@ -50,7 +49,6 @@ function formatDate(isoString) {
   }
 }
 
-// Carregador dinâmico do JSZip para compactar pastas no navegador sem precisar instalar pacotes extras no npm
 async function loadJSZip() {
   if (window.JSZip) return window.JSZip;
   return new Promise((resolve, reject) => {
@@ -76,6 +74,11 @@ export default function App() {
   const [googleConnected, setGoogleConnected] = useState(false);
   const tokenClientRef = useRef(null);
   const autoSyncedRef = useRef(false);
+
+  // Refs de controle de cache para evitar recarregamento ao alternar abas
+  const loadedUserIdRef = useRef(null);
+  const awaitingLoadedRef = useRef(false);
+  const signedUrlsCacheRef = useRef({});
 
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -117,9 +120,13 @@ export default function App() {
   const [signedUrls, setSignedUrls] = useState({});
   const [loadingData, setLoadingData] = useState(false);
 
+  // Estados de Busca Rápida e Paginação
   const [activeTab, setActiveTab] = useState('catalogo');
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('Todas');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState(12);
   const [toast, setToast] = useState(null);
 
   const [selectedModel, setSelectedModel] = useState(null);
@@ -148,7 +155,6 @@ export default function App() {
   const [uploadStep, setUploadStep] = useState('');
   const [pendingRecovery, setPendingRecovery] = useState(null);
 
-  // Estados do Novo Fluxo de Importação (importações/Aguardando -> Compactar ZIP -> importações/Importadas)
   const [importPipelineIds, setImportPipelineIds] = useState({
     importacoesId: '',
     aguardandoId: '',
@@ -176,6 +182,20 @@ export default function App() {
     setToast({ message, type });
     setTimeout(() => setToast(null), 6000);
   };
+
+  // Debounce super rápido (150ms) para que a digitação na pesquisa nunca trave a interface
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedQuery(searchInput.trim().toLowerCase());
+      setCurrentPage(1);
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  // Sempre volta para a página 1 quando trocar a categoria ou o limite por página
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [selectedCategory, itemsPerPage]);
 
   const allCategories = useMemo(() => {
     const custom = Array.isArray(settings.custom_categories) ? settings.custom_categories : [];
@@ -254,7 +274,6 @@ export default function App() {
     script.async = true;
     script.defer = true;
     document.body.appendChild(script);
-    // Pré-carrega o JSZip em background
     loadJSZip().catch(() => {});
   }, []);
 
@@ -263,33 +282,77 @@ export default function App() {
       setAuthLoading(false);
       return;
     }
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
+    supabase.auth.getSession().then(({ data: { session: initialSession } }) => {
+      setSession(initialSession);
       setAuthLoading(false);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, newSession) => {
+      // Evita recarregar dados quando o navegador apenas renova o token ao voltar para a aba
+      if (event === 'SIGNED_OUT') {
+        loadedUserIdRef.current = null;
+        awaitingLoadedRef.current = false;
+        signedUrlsCacheRef.current = {};
+        setModels([]);
+        setSession(null);
+      } else if (newSession?.user?.id !== loadedUserIdRef.current) {
+        setSession(newSession);
+      }
     });
     return () => subscription.unsubscribe();
   }, []);
 
+  // Carrega dados apenas 1 vez por usuário autenticado (ou quando solicitado manualmente)
   useEffect(() => {
-    if (session?.user) {
-      loadUserData();
+    const currentUserId = session?.user?.id;
+    if (currentUserId && loadedUserIdRef.current !== currentUserId) {
+      loadedUserIdRef.current = currentUserId;
+      loadUserData(false);
     }
-  }, [session]);
+  }, [session?.user?.id]);
 
-  const loadUserData = async () => {
+  // Busca em lote (1 única requisição rápida) as URLs assinadas apenas para os modelos visíveis na página atual
+  const ensureSignedUrlsForModels = useCallback(async (modelsToLoad) => {
+    if (!supabase || !modelsToLoad?.length) return;
+
+    const missingModels = modelsToLoad.filter(
+      (m) => m.image_path && !signedUrlsCacheRef.current[m.id]
+    );
+    if (missingModels.length === 0) return;
+
+    const paths = missingModels.map((m) => m.image_path);
+    const { data: signedList } = await supabase.storage
+      .from('stl-images')
+      .createSignedUrls(paths, 3600);
+
+    if (signedList && Array.isArray(signedList)) {
+      const newUrls = {};
+      signedList.forEach((item, index) => {
+        const model = missingModels[index];
+        if (model && item?.signedUrl) {
+          signedUrlsCacheRef.current[model.id] = item.signedUrl;
+          newUrls[model.id] = item.signedUrl;
+        }
+      });
+      if (Object.keys(newUrls).length > 0) {
+        setSignedUrls((prev) => ({ ...prev, ...newUrls }));
+      }
+    }
+  }, []);
+
+  const loadUserData = async (silent = false) => {
     if (!supabase || !session?.user) return;
-    setLoadingData(true);
+    if (!silent) setLoadingData(true);
     try {
-      const { data: cfg } = await supabase
-        .from('user_settings')
-        .select('*')
-        .eq('user_id', session.user.id)
-        .maybeSingle();
+      // Executa todas as consultas ao Supabase em paralelo (Promise.all) para máxima velocidade
+      const [cfgRes, modelsRes, matRes, printRes] = await Promise.all([
+        supabase.from('user_settings').select('*').eq('user_id', session.user.id).maybeSingle(),
+        supabase.from('stl_models').select('*').order('created_at', { ascending: false }),
+        supabase.from('stl_materials').select('*').order('name'),
+        supabase.from('stl_printers').select('*').order('name')
+      ]);
 
+      const cfg = cfgRes.data;
       const localCachedCats = JSON.parse(localStorage.getItem(`stl_cats_${session.user.id}`) || '[]');
 
       if (cfg) {
@@ -301,10 +364,7 @@ export default function App() {
         if (!migrationDone) {
           shouldUseSubfolders = true;
           localStorage.setItem(`stl_subfolders_migrated_${session.user.id}`, 'true');
-          await supabase
-            .from('user_settings')
-            .update({ organize_by_subfolders: true })
-            .eq('user_id', session.user.id);
+          supabase.from('user_settings').update({ organize_by_subfolders: true }).eq('user_id', session.user.id);
         }
 
         setSettings({
@@ -337,55 +397,82 @@ export default function App() {
         setSettings((prev) => ({ ...prev, custom_categories: localCachedCats, organize_by_subfolders: true }));
       }
 
-      const { data: modelList } = await supabase
-        .from('stl_models')
-        .select('*')
-        .order('created_at', { ascending: false });
-      setModels(modelList || []);
+      const modelList = modelsRes.data || [];
+      setModels(modelList);
 
-      const { data: matList } = await supabase
-        .from('stl_materials')
-        .select('*')
-        .order('name');
-      setMaterials(matList || []);
-      if (matList?.length > 0 && !calcForm.materialId) {
+      const matList = matRes.data || [];
+      setMaterials(matList);
+      if (matList.length > 0 && !calcForm.materialId) {
         setCalcForm((prev) => ({ ...prev, materialId: matList[0].id }));
       }
 
-      const { data: printList } = await supabase
-        .from('stl_printers')
-        .select('*')
-        .order('name');
-      setPrinters(printList || []);
-      if (printList?.length > 0 && !calcForm.printerId) {
+      const printList = printRes.data || [];
+      setPrinters(printList);
+      if (printList.length > 0 && !calcForm.printerId) {
         setCalcForm((prev) => ({ ...prev, printerId: printList[0].id }));
       }
-
-      const urls = {};
-      for (const m of (modelList || [])) {
-        if (m.image_path) {
-          const { data: signed } = await supabase
-            .storage
-            .from('stl-images')
-            .createSignedUrl(m.image_path, 3600);
-          if (signed?.signedUrl) {
-            urls[m.id] = signed.signedUrl;
-          }
-        }
-      }
-      setSignedUrls(urls);
     } catch (err) {
       showToast(`Erro ao carregar dados: ${err.message}`, 'error');
     } finally {
-      setLoadingData(false);
+      if (!silent) setLoadingData(false);
     }
   };
+
+  // ============================================================================
+  // FILTRAGEM RÁPIDA + PAGINAÇÃO DO CATÁLOGO
+  // ============================================================================
+  const filteredModels = useMemo(() => {
+    return models.filter((m) => {
+      const matchesCat = selectedCategory === 'Todas' || m.category === selectedCategory;
+      if (!matchesCat) return false;
+      if (!debouncedQuery) return true;
+      return (
+        m.name?.toLowerCase().includes(debouncedQuery) ||
+        m.description?.toLowerCase().includes(debouncedQuery) ||
+        m.category?.toLowerCase().includes(debouncedQuery) ||
+        m.tags?.some((t) => t.toLowerCase().includes(debouncedQuery))
+      );
+    });
+  }, [models, selectedCategory, debouncedQuery]);
+
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(filteredModels.length / itemsPerPage));
+  }, [filteredModels.length, itemsPerPage]);
+
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+
+  const paginatedModels = useMemo(() => {
+    const startIndex = (safeCurrentPage - 1) * itemsPerPage;
+    return filteredModels.slice(startIndex, startIndex + itemsPerPage);
+  }, [filteredModels, safeCurrentPage, itemsPerPage]);
+
+  // Carrega instantaneamente em lote as imagens da página visível atual
+  useEffect(() => {
+    if (paginatedModels.length > 0) {
+      ensureSignedUrlsForModels(paginatedModels);
+    }
+  }, [paginatedModels, ensureSignedUrlsForModels]);
+
+  // Lista de números de páginas para o seletor de paginação
+  const pageNumbers = useMemo(() => {
+    const pages = [];
+    const maxVisible = 5;
+    let start = Math.max(1, safeCurrentPage - Math.floor(maxVisible / 2));
+    let end = Math.min(totalPages, start + maxVisible - 1);
+    if (end - start + 1 < maxVisible) {
+      start = Math.max(1, end - maxVisible + 1);
+    }
+    for (let i = start; i <= end; i++) {
+      pages.push(i);
+    }
+    return pages;
+  }, [safeCurrentPage, totalPages]);
 
   useEffect(() => {
     if (googleConnected && settings.root_folder_id && settings.organize_by_subfolders && !autoSyncedRef.current) {
       autoSyncedRef.current = true;
       handleSyncAllCategorySubfolders(settings.root_folder_id, true);
-    } else if (googleConnected && settings.root_folder_id) {
+    } else if (googleConnected && settings.root_folder_id && existingSubfolders.length === 0) {
       fetchRootSubfolders(settings.root_folder_id);
     }
   }, [googleConnected, settings.root_folder_id, settings.organize_by_subfolders]);
@@ -476,9 +563,6 @@ export default function App() {
     showToast('Conta Google desconectada.');
   };
 
-  // ============================================================================
-  // FUNÇÃO GENÉRICA PARA GARANTIR QUALQUER SUBPASTA NO DRIVE
-  // ============================================================================
   const ensureSpecificSubfolderInDrive = async (folderName, parentId) => {
     if (!parentId || !folderName) return parentId;
     const trimmed = folderName.trim();
@@ -515,7 +599,6 @@ export default function App() {
     return created.id;
   };
 
-  // Garante a árvore: Pasta Raiz -> importações -> Aguardando & Importadas
   const ensureImportPipelineFolders = async (rootIdOverride) => {
     const rootId = rootIdOverride || settings.root_folder_id;
     if (!rootId) throw new Error('Pasta raiz não configurada.');
@@ -603,10 +686,9 @@ export default function App() {
         }
       }
 
-      // Também garante a estrutura importações/Aguardando e importações/Importadas
       await ensureImportPipelineFolders(rootId);
-
       await fetchRootSubfolders(rootId);
+
       if (!silent || createdCount > 0) {
         showToast(
           createdCount > 0
@@ -792,6 +874,7 @@ export default function App() {
     }
     setSettings(updated);
     setImportPipelineIds({ importacoesId: '', aguardandoId: '', importadasId: '' });
+    awaitingLoadedRef.current = false;
     setPendingFolderSelection(null);
     setFolderPickerOpen(false);
     showToast(`Pasta raiz "${folderName}" vinculada! Montando subpastas...`);
@@ -887,7 +970,7 @@ export default function App() {
       setPendingRecovery(null);
       showToast(`Modelo enviado para o Drive e catalogado com sucesso!`);
       setActiveTab('catalogo');
-      loadUserData();
+      loadUserData(true);
     } catch (err) {
       if (uploadedDriveData?.id) {
         setPendingRecovery({
@@ -958,7 +1041,7 @@ export default function App() {
       });
       showToast('Cadastro recuperado e concluído com sucesso!');
       setActiveTab('catalogo');
-      loadUserData();
+      loadUserData(true);
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -968,7 +1051,7 @@ export default function App() {
   };
 
   // ============================================================================
-  // NOVO FLUXO DE IMPORTAÇÃO: importações/Aguardando -> Compactar ZIP -> importações/Importadas
+  // FILA DE IMPORTAÇÃO COM CACHE (Evita refazer busca ao alternar abas)
   // ============================================================================
   const fetchAwaitingImports = async () => {
     if (!settings.root_folder_id) return;
@@ -982,6 +1065,7 @@ export default function App() {
       if (!res.ok) throw new Error('Erro ao listar itens da pasta importações/Aguardando.');
       const data = await res.json();
       setAwaitingItems(data.files || []);
+      awaitingLoadedRef.current = true;
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -990,12 +1074,12 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (activeTab === 'importar' && googleConnected && settings.root_folder_id) {
+    // Só busca automaticamente na primeira vez que abrir a aba Importar; nas próximas usa o cache instantâneo
+    if (activeTab === 'importar' && googleConnected && settings.root_folder_id && !awaitingLoadedRef.current) {
       fetchAwaitingImports();
     }
   }, [activeTab, googleConnected, settings.root_folder_id]);
 
-  // Lê recursivamente todos os arquivos de uma pasta do Google Drive e adiciona ao objeto JSZip
   const addDriveFolderToZipRecursively = async (folderId, zipFolderInstance, statusPrefix = '') => {
     const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
     const res = await googleDriveFetch(
@@ -1047,7 +1131,6 @@ export default function App() {
           importingFile.name.toLowerCase().endsWith('.zip'));
 
       if (isFolder) {
-        // 1. Compacta todos os arquivos da pasta em um único arquivo .ZIP
         setUploadStep(`Carregando compactador e lendo a pasta "${importingFile.name}"...`);
         const JSZip = await loadJSZip();
         const zip = new JSZip();
@@ -1064,7 +1147,6 @@ export default function App() {
           compressionOptions: { level: 6 }
         });
       } else if (isAlreadyZip) {
-        // Caso o usuário tenha colocado um arquivo .ZIP direto na pasta Aguardando
         setUploadStep(`Lendo arquivo ZIP "${importingFile.name}"...`);
         const fileRes = await googleDriveFetch(
           `https://www.googleapis.com/drive/v3/files/${importingFile.id}?alt=media`
@@ -1072,7 +1154,6 @@ export default function App() {
         if (!fileRes.ok) throw new Error('Não foi possível ler o arquivo ZIP de Aguardando.');
         zipBlobToUpload = await fileRes.blob();
       } else {
-        // Caso seja um arquivo avulso (.stl, .obj, etc.), compacta em .ZIP
         setUploadStep(`Compactando arquivo "${importingFile.name}" em .ZIP...`);
         const JSZip = await loadJSZip();
         const zip = new JSZip();
@@ -1085,7 +1166,6 @@ export default function App() {
         zipBlobToUpload = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
       }
 
-      // 2. Salva o novo .ZIP compactado dentro da pasta da Categoria escolhida
       setUploadStep(`Salvando "${finalZipFileName}" na pasta da categoria "${importForm.category}"...`);
       const metadata = {
         name: finalZipFileName,
@@ -1105,13 +1185,11 @@ export default function App() {
       }
       const uploadedZipData = await uploadRes.json();
 
-      // 3. Registra os metadados e a imagem de referência no Supabase
       await completeDatabaseRegistration(uploadedZipData, targetCategoryFolderId, {
         ...importForm,
         zipFile: { size: zipBlobToUpload.size }
       });
 
-      // 4. Move a pasta/arquivo original de importações/Aguardando para importações/Importadas
       setUploadStep(`Movendo "${importingFile.name}" para importações/Importadas...`);
       const currentParent = importingFile.parents?.[0] || pipeline.aguardandoId;
       const moveRes = await googleDriveFetch(
@@ -1130,13 +1208,14 @@ export default function App() {
         );
       } else {
         showToast(
-          `Sucesso! Compactado em "${ importForm.category }" e pasta original movida para importações/Importadas!`
+          `Sucesso! Compactado em "${importForm.category}" e pasta original movida para importações/Importadas!`
         );
       }
 
+      // Remove o item importado da lista em memória imediatamente
+      setAwaitingItems((prev) => prev.filter((i) => i.id !== importingFile.id));
       setImportingFile(null);
-      fetchAwaitingImports();
-      loadUserData();
+      loadUserData(true);
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -1192,6 +1271,8 @@ export default function App() {
           await supabase.storage.from('stl-images').remove([editingModel.image_path]);
         }
 
+        // Limpa o cache da imagem antiga para forçar a nova URL assinada
+        delete signedUrlsCacheRef.current[editingModel.id];
         imagePath = fileName;
       }
 
@@ -1213,10 +1294,10 @@ export default function App() {
         .eq('id', editingModel.id);
 
       if (error) throw error;
-      showToast('Cadastro e imagem atualizados com sucesso!');
+      showToast('Cadastro atualizado com sucesso!');
       setEditingModel(null);
       setSelectedModel(null);
-      loadUserData();
+      loadUserData(true);
     } catch (err) {
       showToast(`Erro ao atualizar: ${err.message}`, 'error');
     } finally {
@@ -1262,6 +1343,9 @@ export default function App() {
 
       if (error) throw error;
 
+      delete signedUrlsCacheRef.current[deleteConfirmModel.id];
+      setModels((prev) => prev.filter((m) => m.id !== deleteConfirmModel.id));
+
       showToast(
         deleteAlsoFromDrive
           ? 'Excluído do catálogo e do Google Drive com sucesso!'
@@ -1270,7 +1354,6 @@ export default function App() {
       setDeleteConfirmModel(null);
       setDeleteAlsoFromDrive(false);
       setSelectedModel(null);
-      loadUserData();
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -1293,7 +1376,7 @@ export default function App() {
       showToast('Material cadastrado!');
       setNewMaterialModal(false);
       setMatForm({ type: 'Filamento', name: '', color: 'Preto', price_per_unit: 80 });
-      loadUserData();
+      loadUserData(true);
     } catch (err) {
       showToast(`Erro: ${err.message}`, 'error');
     }
@@ -1303,7 +1386,7 @@ export default function App() {
     if (!supabase) return;
     await supabase.from('stl_materials').delete().eq('id', id);
     showToast('Material excluído.');
-    loadUserData();
+    loadUserData(true);
   };
 
   const handleSavePrinter = async (e) => {
@@ -1321,7 +1404,7 @@ export default function App() {
       showToast('Impressora cadastrada!');
       setNewPrinterModal(false);
       setPrintForm({ name: '', power_watts: 150, printer_value: 2000, lifespan_hours: 5000 });
-      loadUserData();
+      loadUserData(true);
     } catch (err) {
       showToast(`Erro: ${err.message}`, 'error');
     }
@@ -1331,7 +1414,7 @@ export default function App() {
     if (!supabase) return;
     await supabase.from('stl_printers').delete().eq('id', id);
     showToast('Impressora excluída.');
-    loadUserData();
+    loadUserData(true);
   };
 
   const calculationResults = useMemo(() => {
@@ -1441,15 +1524,6 @@ export default function App() {
       )}
     </div>
   );
-
-  const filteredModels = useMemo(() => {
-    return models.filter((m) => {
-      const matchesCat = selectedCategory === 'Todas' || m.category === selectedCategory;
-      const q = searchQuery.toLowerCase();
-      const matchesQuery = !q || m.name?.toLowerCase().includes(q) || m.description?.toLowerCase().includes(q) || m.tags?.some((t) => t.toLowerCase().includes(q));
-      return matchesCat && matchesQuery;
-    });
-  }, [models, selectedCategory, searchQuery]);
 
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     return (
@@ -1615,81 +1689,236 @@ export default function App() {
       <main className="max-w-7xl mx-auto w-full px-3 sm:px-6 py-6 sm:py-8 flex-1">
         {activeTab === 'catalogo' && (
           <div className="space-y-6">
-            <div className="flex flex-col md:flex-row gap-4 items-stretch md:items-center justify-between bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
-              <div className="relative w-full md:w-64 focus-within:md:w-96 transition-all duration-300">
+            {/* Barra de Pesquisa Rápida Expandível + Seletor de Categoria + Seletor de Itens por Página */}
+            <div className="flex flex-col lg:flex-row gap-4 items-stretch lg:items-center justify-between bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
+              <div className="relative w-full lg:w-72 focus-within:lg:w-[440px] transition-all duration-300">
                 <Search className="w-4 h-4 text-[#8c877e] absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Buscar modelo por nome, tag..."
-                  className="w-full pl-10 pr-4 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none focus:border-[#e4e0d7] transition-all"
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
+                  placeholder="Buscar modelo por nome, descrição ou tag..."
+                  className="w-full pl-10 pr-9 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none focus:border-[#e4e0d7] transition-all"
                 />
+                {searchInput && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchInput('')}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[#8c877e] hover:text-[#e4e0d7] cursor-pointer"
+                    title="Limpar pesquisa"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
               </div>
 
-              <div className="flex items-center gap-2.5 w-full md:w-auto">
-                <div className="flex items-center gap-2 text-xs text-[#a39e93] font-medium shrink-0">
-                  <Filter className="w-4 h-4 text-[#c89d66]" />
-                  <span>Filtrar Categoria:</span>
+              <div className="flex flex-wrap sm:flex-nowrap items-center gap-3 w-full lg:w-auto justify-end">
+                {/* Seletor de Categoria */}
+                <div className="flex items-center gap-2 flex-1 sm:flex-initial">
+                  <Filter className="w-4 h-4 text-[#c89d66] shrink-0" />
+                  <select
+                    value={selectedCategory}
+                    onChange={(e) => setSelectedCategory(e.target.value)}
+                    className="w-full sm:w-56 px-3.5 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-xs sm:text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7] cursor-pointer"
+                  >
+                    <option value="Todas" className="bg-[#0a0a0a] text-[#e4e0d7]">Todas as Categorias ({models.length})</option>
+                    {allCategories.map((cat) => (
+                      <option key={cat} value={cat} className="bg-[#0a0a0a] text-[#e4e0d7]">
+                        {cat}
+                      </option>
+                    ))}
+                  </select>
                 </div>
-                <select
-                  value={selectedCategory}
-                  onChange={(e) => setSelectedCategory(e.target.value)}
-                  className="flex-1 md:w-64 px-3.5 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7] cursor-pointer"
+
+                {/* Seletor de Quantidade por Página */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-[#8c877e] whitespace-nowrap">Por página:</span>
+                  <select
+                    value={itemsPerPage}
+                    onChange={(e) => setItemsPerPage(Number(e.target.value))}
+                    className="px-3 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-xs sm:text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7] cursor-pointer"
+                  >
+                    <option value={8}>8</option>
+                    <option value={12}>12</option>
+                    <option value={24}>24</option>
+                    <option value={48}>48</option>
+                  </select>
+                </div>
+
+                {/* Botão discreto para atualizar manualmente se desejar */}
+                <button
+                  type="button"
+                  onClick={() => loadUserData(false)}
+                  title="Sincronizar catálogo"
+                  className="p-2.5 rounded-xl bg-[#000000] hover:bg-[#141413] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522] cursor-pointer transition"
                 >
-                  <option value="Todas" className="bg-[#0a0a0a] text-[#e4e0d7]">Todas as Categorias ({models.length})</option>
-                  {allCategories.map((cat) => (
-                    <option key={cat} value={cat} className="bg-[#0a0a0a] text-[#e4e0d7]">
-                      {cat}
-                    </option>
-                  ))}
-                </select>
+                  <RefreshCw className={`w-4 h-4 ${loadingData ? 'animate-spin text-[#e4e0d7]' : ''}`} />
+                </button>
               </div>
             </div>
 
             {loadingData ? (
-              <div className="py-20 text-center text-[#a39e93] flex flex-col items-center gap-3"><RefreshCw className="w-7 h-7 animate-spin text-[#e4e0d7]" /><span className="text-sm">Carregando seus modelos 3D...</span></div>
+              <div className="py-20 text-center text-[#a39e93] flex flex-col items-center gap-3">
+                <RefreshCw className="w-7 h-7 animate-spin text-[#e4e0d7]" />
+                <span className="text-sm">Carregando seus modelos 3D...</span>
+              </div>
             ) : filteredModels.length === 0 ? (
               <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 sm:p-12 text-center space-y-4">
                 <FileArchive className="w-12 h-12 text-[#5e5a52] mx-auto" />
                 <div className="space-y-1">
                   <h3 className="text-base font-semibold text-[#e4e0d7]">Nenhum modelo STL encontrado</h3>
-                  <p className="text-xs text-[#8c877e] max-w-md mx-auto">Envie um novo arquivo ZIP ou importe pastas de importações/Aguardando.</p>
+                  <p className="text-xs text-[#8c877e] max-w-md mx-auto">
+                    {searchInput || selectedCategory !== 'Todas'
+                      ? 'Nenhum modelo corresponde aos filtros aplicados.'
+                      : 'Envie um novo arquivo ZIP ou importe pastas de importações/Aguardando.'}
+                  </p>
                 </div>
                 <div className="flex flex-wrap justify-center gap-3 pt-2">
-                  <button onClick={() => setActiveTab('upload')} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold transition cursor-pointer">Enviar Novo ZIP</button>
-                  <button onClick={() => setActiveTab('importar')} className="px-4 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold transition cursor-pointer">Importar de Aguardando</button>
+                  {(searchInput || selectedCategory !== 'Todas') ? (
+                    <button
+                      onClick={() => { setSearchInput(''); setSelectedCategory('Todas'); }}
+                      className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold transition cursor-pointer"
+                    >
+                      Limpar Filtros
+                    </button>
+                  ) : (
+                    <>
+                      <button onClick={() => setActiveTab('upload')} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold transition cursor-pointer">Enviar Novo ZIP</button>
+                      <button onClick={() => setActiveTab('importar')} className="px-4 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold transition cursor-pointer">Importar de Aguardando</button>
+                    </>
+                  )}
                 </div>
               </div>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-5">
-                {filteredModels.map((model) => {
-                  const imgUrl = signedUrls[model.id];
-                  return (
-                    <div key={model.id} onClick={() => handleOpenDetails(model)} className="group bg-[#0a0a0a] border border-[#262522] hover:border-[#e4e0d7]/60 rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg">
-                      <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
-                        {imgUrl ? <img src={imgUrl} alt={model.name} className="w-full h-full object-cover group-hover:scale-105 transition duration-300" /> : <div className="flex flex-col items-center gap-1 text-[#5e5a52]"><Box className="w-10 h-10" /><span className="text-[11px]">Sem imagem</span></div>}
-                        <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[#000000]/85 backdrop-blur text-[#e4e0d7] border border-[#e4e0d7]/30">{model.category}</span>
-                      </div>
-                      <div className="p-4 flex-1 flex flex-col justify-between space-y-3">
-                        <div>
-                          <h3 className="font-bold text-[#e4e0d7] text-sm group-hover:text-white transition line-clamp-1">{model.name}</h3>
-                          <p className="text-xs text-[#8c877e] line-clamp-2 mt-1">{model.description || 'Sem descrição.'}</p>
-                        </div>
-                        <div className="space-y-2 pt-2 border-t border-[#1c1b19]">
-                          {model.tags?.length > 0 && (
-                            <div className="flex flex-wrap gap-1">{model.tags.slice(0, 3).map((tag, idx) => <span key={idx} className="px-2 py-0.5 bg-[#141413] text-[#a39e93] border border-[#262522] rounded text-[10px]">#{tag}</span>)}</div>
+              <>
+                {/* Grid Paginado de Modelos */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-5">
+                  {paginatedModels.map((model) => {
+                    const imgUrl = signedUrls[model.id] || signedUrlsCacheRef.current[model.id];
+                    return (
+                      <div key={model.id} onClick={() => handleOpenDetails(model)} className="group bg-[#0a0a0a] border border-[#262522] hover:border-[#e4e0d7]/60 rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg">
+                        <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
+                          {imgUrl ? (
+                            <img
+                              src={imgUrl}
+                              alt={model.name}
+                              loading="lazy"
+                              className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                            />
+                          ) : (
+                            <div className="flex flex-col items-center gap-1 text-[#5e5a52]">
+                              <Box className="w-10 h-10" />
+                              <span className="text-[11px]">Sem imagem</span>
+                            </div>
                           )}
-                          <div className="flex items-center justify-between text-[11px] text-[#8c877e]">
-                            <span>{formatBytes(model.drive_file_size)}</span>
-                            <span className="text-[#e4e0d7] font-semibold group-hover:underline">Detalhes &rarr;</span>
+                          <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[#000000]/85 backdrop-blur text-[#e4e0d7] border border-[#e4e0d7]/30">
+                            {model.category}
+                          </span>
+                        </div>
+                        <div className="p-4 flex-1 flex flex-col justify-between space-y-3">
+                          <div>
+                            <h3 className="font-bold text-[#e4e0d7] text-sm group-hover:text-white transition line-clamp-1">{model.name}</h3>
+                            <p className="text-xs text-[#8c877e] line-clamp-2 mt-1">{model.description || 'Sem descrição.'}</p>
+                          </div>
+                          <div className="space-y-2 pt-2 border-t border-[#1c1b19]">
+                            {model.tags?.length > 0 && (
+                              <div className="flex flex-wrap gap-1">
+                                {model.tags.slice(0, 3).map((tag, idx) => (
+                                  <span key={idx} className="px-2 py-0.5 bg-[#141413] text-[#a39e93] border border-[#262522] rounded text-[10px]">
+                                    #{tag}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            <div className="flex items-center justify-between text-[11px] text-[#8c877e]">
+                              <span>{formatBytes(model.drive_file_size)}</span>
+                              <span className="text-[#e4e0d7] font-semibold group-hover:underline">Detalhes &rarr;</span>
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
+                    );
+                  })}
+                </div>
+
+                {/* BARRA DE PAGINAÇÃO MODERNA */}
+                <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+                  <div className="text-xs text-[#8c877e]">
+                    Mostrando{' '}
+                    <strong className="text-[#e4e0d7]">
+                      {(safeCurrentPage - 1) * itemsPerPage + 1}
+                    </strong>{' '}
+                    a{' '}
+                    <strong className="text-[#e4e0d7]">
+                      {Math.min(safeCurrentPage * itemsPerPage, filteredModels.length)}
+                    </strong>{' '}
+                    de <strong className="text-[#e4e0d7]">{filteredModels.length}</strong> modelo(s)
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={safeCurrentPage === 1}
+                      onClick={() => setCurrentPage(1)}
+                      className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] disabled:opacity-35 disabled: pointer-events-none cursor-pointer transition"
+                      title="Primeira Página"
+                    >
+                      <ChevronsLeft className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={safeCurrentPage === 1}
+                      onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                      className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] disabled:opacity-35 disabled:pointer-events-none cursor-pointer transition"
+                      title="Página Anterior"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                    </button>
+
+                    {pageNumbers[0] > 1 && (
+                      <span className="px-2 text-xs text-[#6e6a61]">...</span>
+                    )}
+
+                    {pageNumbers.map((num) => (
+                      <button
+                        key={num}
+                        type="button"
+                        onClick={() => setCurrentPage(num)}
+                        className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                          num === safeCurrentPage
+                            ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
+                            : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] hover:border-[#e4e0d7]/40'
+                        }`}
+                      >
+                        {num}
+                      </button>
+                    ))}
+
+                    {pageNumbers[pageNumbers.length - 1] < totalPages && (
+                      <span className="px-2 text-xs text-[#6e6a61]">...</span>
+                    )}
+
+                    <button
+                      type="button"
+                      disabled={safeCurrentPage === totalPages}
+                      onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                      className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] disabled:opacity-35 disabled:pointer-events-none cursor-pointer transition"
+                      title="Próxima Página"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={safeCurrentPage === totalPages}
+                      onClick={() => setCurrentPage(totalPages)}
+                      className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] disabled:opacity-35 disabled:pointer-events-none cursor-pointer transition"
+                      title="Última Página"
+                    >
+                      <ChevronsRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </>
             )}
           </div>
         )}
@@ -1750,7 +1979,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ABA IMPORTAR: Fluxo importações/Aguardando -> Compactar ZIP -> Categoria -> importações/Importadas */}
+        {/* ABA IMPORTAR */}
         {activeTab === 'importar' && (
           <div className="space-y-6">
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
@@ -2167,7 +2396,23 @@ export default function App() {
         <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
           <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
             <div className="aspect-video bg-[#000000] relative flex items-center justify-center border-b border-[#1c1b19]">
-              {signedUrls[selectedModel.id] ? <img src={signedUrls[selectedModel.id]} alt={selectedModel.name} className="w-full h-full object-contain" /> : <div className="text-[#5e5a52] text-xs">Sem imagem</div>}
+              {(signedUrls[selectedModel.id] || signedUrlsCacheRef.current[selectedModel.id]) ? (
+                <>
+                  <img
+                    src={signedUrls[selectedModel.id] || signedUrlsCacheRef.current[selectedModel.id]}
+                    alt={selectedModel.name}
+                    className="w-full h-full object-contain"
+                  />
+                  <button
+                    onClick={() => setLightboxUrl(signedUrls[selectedModel.id] || signedUrlsCacheRef.current[selectedModel.id])}
+                    className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-[#000000]/85 text-[#e4e0d7] text-xs flex items-center gap-1.5 border border-[#e4e0d7]/30 cursor-pointer"
+                  >
+                    <Eye className="w-4 h-4" /> Ampliar
+                  </button>
+                </>
+              ) : (
+                <div className="text-[#5e5a52] text-xs">Sem imagem</div>
+              )}
               <button onClick={() => setSelectedModel(null)} className="absolute top-3 right-3 p-2 rounded-full bg-[#000000]/80 text-[#a39e93] cursor-pointer"><X className="w-5 h-5" /></button>
             </div>
             <div className="p-4 sm:p-6 space-y-4 max-h-[60vh] overflow-y-auto">
@@ -2236,7 +2481,7 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL DE IMPORTAÇÃO COMPLETO (IDÊNTICO AO DE ENVIO: Nome, Categoria, Descrição, Tags, Observações e Imagem) */}
+      {/* MODAL DE IMPORTAÇÃO COMPLETO */}
       {importingFile && (
         <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 overflow-y-auto">
           <form onSubmit={handleConfirmImport} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-xl w-full p-6 space-y-4 my-auto max-h-[92vh] overflow-y-auto">
