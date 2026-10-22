@@ -1456,14 +1456,32 @@ export default function App() {
       <main className="max-w-7xl mx-auto w-full px-3 sm:px-6 py-6 sm:py-8 flex-1">
         {activeTab === 'catalogo' && (
           <div className="space-y-6">
-            <div className="flex flex-col md:flex-row gap-3 sm:gap-4 items-stretch md:items-center justify-between">
-              <div className="relative flex-1">
+            {/* Barra de Pesquisa Expansível e Categorias Organizadas */}
+            <div className="flex flex-col lg:flex-row gap-4 items-stretch lg:items-center justify-between bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
+              {/* Barra de Pesquisa com Efeito Foco Expandido */}
+              <div className="relative w-full lg:w-64 focus-within:lg:w-96 transition-all duration-300">
                 <Search className="w-4 h-4 text-[#8c877e] absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Buscar modelo por nome, descrição ou tag..." className="w-full pl-10 pr-4 py-2.5 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none focus:border-[#e4e0d7]" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Buscar modelo por nome, tag..."
+                  className="w-full pl-10 pr-4 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none focus:border-[#e4e0d7] transition-all"
+                />
               </div>
-              <div className="flex items-center gap-2 overflow-x-auto pb-2 md:pb-0">
+
+              {/* Filtros de Categoria Organizados e Fluidos */}
+              <div className="flex items-center gap-2 overflow-x-auto pb-1 lg:pb-0 scrollbar-thin">
                 {['Todas', ...allCategories].map((cat) => (
-                  <button key={cat} onClick={() => setSelectedCategory(cat)} className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer ${selectedCategory === cat ? 'bg-[#e4e0d7] text-[#000000]' : 'bg-[#0a0a0a] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522]'}`}>
+                  <button
+                    key={cat}
+                    onClick={() => setSelectedCategory(cat)}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition cursor-pointer ${
+                      selectedCategory === cat
+                        ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
+                        : 'bg-[#000000] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522]'
+                    }`}
+                  >
                     {cat}
                   </button>
                 ))}
