@@ -5,7 +5,9 @@ import {
   Trash2, Edit3, Eye, CheckCircle2, AlertTriangle, Folder,
   HardDrive, ShieldCheck, RefreshCw, X, Check, FileArchive,
   LogOut, FolderPlus, Tag, Calculator, Menu, Filter, ArrowRight,
-  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Share2, Copy, Link2, Images
+  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Share2,
+  Copy, Link2, Images, ListOrdered, CheckSquare, Square, ArrowUpDown,
+  FileWarning, Layers
 } from 'lucide-react';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
@@ -29,6 +31,12 @@ const BASE_CATEGORIES = [
   'Suportes & Cases'
 ];
 
+const PRIORITY_WEIGHT = {
+  Alta: 3,
+  Normal: 2,
+  Baixa: 1
+};
+
 function formatBytes(bytes = 0) {
   if (!bytes || bytes === 0) return '0 B';
   const k = 1024;
@@ -37,7 +45,6 @@ function formatBytes(bytes = 0) {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
 
-// Helper que retorna sempre o array de caminhos de imagem de um modelo (compatível com modelos antigos e novos)
 function getModelImagePaths(model) {
   if (!model) return [];
   if (Array.isArray(model.image_paths) && model.image_paths.length > 0) {
@@ -87,7 +94,6 @@ export default function App() {
   const refreshPromiseRef = useRef(null);
   const loadedUserIdRef = useRef(null);
   const awaitingLoadedRef = useRef(false);
-  // Cache de URLs assinadas indexado pelo caminho do arquivo (path -> signedUrl)
   const signedPathCacheRef = useRef({});
 
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -130,6 +136,17 @@ export default function App() {
   const [models, setModels] = useState([]);
   const [pathUrls, setPathUrls] = useState({});
   const [loadingData, setLoadingData] = useState(false);
+
+  // Estados de Ordenação, Ações em Lote e Verificação de Ghost Files
+  const [sortBy, setSortBy] = useState('newest');
+  const [bulkMode, setBulkMode] = useState(false);
+  const [selectedModelIds, setSelectedModelIds] = useState([]);
+  const [bulkCategoryModalOpen, setBulkCategoryModalOpen] = useState(false);
+  const [bulkTargetCategory, setBulkTargetCategory] = useState('Geral');
+  const [bulkDeleteModalOpen, setBulkDeleteModalOpen] = useState(false);
+  const [bulkDeleteAlsoDrive, setBulkDeleteAlsoDrive] = useState(false);
+  const [scanningGhostFiles, setScanningGhostFiles] = useState(false);
+  const [onlyGhostFilter, setOnlyGhostFilter] = useState(false);
 
   const [sharedLinks, setSharedLinks] = useState([]);
   const [shareModalOpen, setShareModalOpen] = useState(false);
@@ -214,7 +231,7 @@ export default function App() {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [selectedCategory, itemsPerPage, visitorSearch]);
+  }, [selectedCategory, itemsPerPage, visitorSearch, sortBy, onlyGhostFilter]);
 
   const allCategories = useMemo(() => {
     const custom = Array.isArray(settings.custom_categories) ? settings.custom_categories : [];
@@ -222,7 +239,22 @@ export default function App() {
     return Array.from(new Set([...BASE_CATEGORIES, ...custom, ...fromModels]));
   }, [settings.custom_categories, models]);
 
-  // Gera URLs assinadas em lote para qualquer lista de paths do Supabase Storage
+  // Modelos na Fila de Impressão ordenados por Prioridade (Alta -> Normal -> Baixa)
+  const queuedModels = useMemo(() => {
+    return models
+      .filter((m) => m.in_print_queue)
+      .sort((a, b) => {
+        const weightDiff = (PRIORITY_WEIGHT[b.queue_priority || 'Normal'] || 2) - (PRIORITY_WEIGHT[a.queue_priority || 'Normal'] || 2);
+        if (weightDiff !== 0) return weightDiff;
+        return new Date(a.queue_added_at || a.created_at) - new Date(b.queue_added_at || b.created_at);
+      });
+  }, [models]);
+
+  // Contador de Ghost Files detectados
+  const ghostCount = useMemo(() => {
+    return models.filter((m) => driveStatusCheck[m.id] === 'missing').length;
+  }, [models, driveStatusCheck]);
+
   const ensureSignedUrlsForPaths = useCallback(async (pathsList) => {
     if (!supabase || !pathsList?.length) return;
     const uniqueMissing = Array.from(
@@ -504,6 +536,291 @@ export default function App() {
     }
   };
 
+  // ============================================================================
+  // FILA DE IMPRESSÃO (PRINT QUEUE)
+  // ============================================================================
+  const handleTogglePrintQueue = async (model, e) => {
+    if (e) e.stopPropagation();
+    if (!supabase) return;
+
+    const nextState = !model.in_print_queue;
+    const nowIso = nextState ? new Date().toISOString() : null;
+
+    setModels((prev) =>
+      prev.map((m) =>
+        m.id === model.id
+          ? { ...m, in_print_queue: nextState, queue_priority: m.queue_priority || 'Normal', queue_added_at: nowIso }
+          : m
+      )
+    );
+
+    if (selectedModel?.id === model.id) {
+      setSelectedModel((prev) => ({
+        ...prev,
+        in_print_queue: nextState,
+        queue_priority: prev.queue_priority || 'Normal',
+        queue_added_at: nowIso
+      }));
+    }
+
+    const { error } = await supabase
+      .from('stl_models')
+      .update({
+        in_print_queue: nextState,
+        queue_priority: model.queue_priority || 'Normal',
+        queue_added_at: nowIso
+      })
+      .eq('id', model.id);
+
+    if (error) {
+      showToast(`Erro ao atualizar fila: ${error.message}`, 'error');
+      loadUserData(true);
+    } else {
+      showToast(nextState ? `"${model.name}" adicionado à Fila de Impressão!` : `"${model.name}" removido da Fila.`);
+    }
+  };
+
+  const handleChangeQueuePriority = async (model, newPriority) => {
+    if (!supabase) return;
+    setModels((prev) =>
+      prev.map((m) => (m.id === model.id ? { ...m, queue_priority: newPriority } : m))
+    );
+    await supabase
+      .from('stl_models')
+      .update({ queue_priority: newPriority })
+      .eq('id', model.id);
+  };
+
+  // ============================================================================
+  // AÇÕES EM LOTE (BULK ACTIONS)
+  // ============================================================================
+  const toggleSelectModelForBulk = (modelId, e) => {
+    if (e) e.stopPropagation();
+    setSelectedModelIds((prev) =>
+      prev.includes(modelId) ? prev.filter((id) => id !== modelId) : [...prev, modelId]
+    );
+  };
+
+  const handleSelectAllCurrentPage = () => {
+    const pageIds = paginatedModels.map((m) => m.id);
+    const allSelected = pageIds.every((id) => selectedModelIds.includes(id));
+    if (allSelected) {
+      setSelectedModelIds((prev) => prev.filter((id) => !pageIds.includes(id)));
+    } else {
+      setSelectedModelIds((prev) => Array.from(new Set([...prev, ...pageIds])));
+    }
+  };
+
+  const handleBulkQueueChange = async (addToQueue = true) => {
+    if (!supabase || selectedModelIds.length === 0) return;
+    setUploading(true);
+    try {
+      const nowIso = addToQueue ? new Date().toISOString() : null;
+      const { error } = await supabase
+        .from('stl_models')
+        .update({ in_print_queue: addToQueue, queue_added_at: nowIso })
+        .in('id', selectedModelIds);
+
+      if (error) throw error;
+
+      setModels((prev) =>
+        prev.map((m) =>
+          selectedModelIds.includes(m.id) ? { ...m, in_print_queue: addToQueue, queue_added_at: nowIso } : m
+        )
+      );
+      showToast(
+        addToQueue
+          ? `${selectedModelIds.length} modelo(s) adicionado(s) à Fila de Impressão!`
+          : `${selectedModelIds.length} modelo(s) removido(s) da Fila.`
+      );
+      setSelectedModelIds([]);
+      setBulkMode(false);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleConfirmBulkCategoryChange = async (e) => {
+    e.preventDefault();
+    if (!supabase || selectedModelIds.length === 0) return;
+    setUploading(true);
+    try {
+      let targetFolderId = settings.root_folder_id;
+      if (settings.organize_by_subfolders && googleConnected && settings.root_folder_id) {
+        setUploadStep(`Garantindo subpasta "${bulkTargetCategory}" no Google Drive...`);
+        targetFolderId = await getTargetUploadFolderId(bulkTargetCategory);
+
+        const selectedModelsList = models.filter((m) => selectedModelIds.includes(m.id));
+        for (let i = 0; i < selectedModelsList.length; i++) {
+          const m = selectedModelsList[i];
+          if (m.drive_file_id && m.drive_folder_id && m.drive_folder_id !== targetFolderId) {
+            setUploadStep(`Movendo arquivo ${i + 1} de ${selectedModelsList.length} no Google Drive...`);
+            await googleDriveFetch(
+              `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}?addParents=${targetFolderId}&removeParents=${m.drive_folder_id}&fields=id,parents`,
+              { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
+            ).catch(() => {});
+          }
+        }
+      }
+
+      const { error } = await supabase
+        .from('stl_models')
+        .update({
+          category: bulkTargetCategory,
+          drive_folder_id: targetFolderId || settings.root_folder_id,
+          updated_at: new Date().toISOString()
+        })
+        .in('id', selectedModelIds);
+
+      if (error) throw error;
+
+      setModels((prev) =>
+        prev.map((m) =>
+          selectedModelIds.includes(m.id)
+            ? { ...m, category: bulkTargetCategory, drive_folder_id: targetFolderId || m.drive_folder_id }
+            : m
+        )
+      );
+
+      showToast(`${selectedModelIds.length} modelo(s) movido(s) para a categoria "${bulkTargetCategory}"!`);
+      setBulkCategoryModalOpen(false);
+      setSelectedModelIds([]);
+      setBulkMode(false);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setUploading(false);
+      setUploadStep('');
+    }
+  };
+
+  const handleConfirmBulkDelete = async () => {
+    if (!supabase || selectedModelIds.length === 0) return;
+    setUploading(true);
+    try {
+      const selectedModelsList = models.filter((m) => selectedModelIds.includes(m.id));
+
+      if (bulkDeleteAlsoDrive && googleConnected) {
+        for (let i = 0; i < selectedModelsList.length; i++) {
+          const m = selectedModelsList[i];
+          setUploadStep(`Excluindo do Google Drive (${i + 1}/${selectedModelsList.length}): ${m.name}...`);
+          let delRes = await googleDriveFetch(
+            `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}`,
+            { method: 'DELETE' }
+          );
+          if (!delRes.ok && delRes.status !== 404) {
+            await googleDriveFetch(
+              `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}`,
+              {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ trashed: true })
+              }
+            ).catch(() => {});
+          }
+        }
+      }
+
+      const allStoragePaths = [];
+      selectedModelsList.forEach((m) => {
+        getModelImagePaths(m).forEach((p) => allStoragePaths.push(p));
+      });
+
+      if (allStoragePaths.length > 0) {
+        await supabase.storage.from('stl-images').remove(allStoragePaths);
+        allStoragePaths.forEach((p) => delete signedPathCacheRef.current[p]);
+      }
+
+      const { error } = await supabase
+        .from('stl_models')
+        .delete()
+        .in('id', selectedModelIds);
+
+      if (error) throw error;
+
+      setModels((prev) => prev.filter((m) => !selectedModelIds.includes(m.id)));
+      showToast(`${selectedModelsList.length} modelo(s) excluído(s) com sucesso!`);
+      setBulkDeleteModalOpen(false);
+      setBulkDeleteAlsoDrive(false);
+      setSelectedModelIds([]);
+      setBulkMode(false);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setUploading(false);
+      setUploadStep('');
+    }
+  };
+
+  // ============================================================================
+  // SINCRONIZAÇÃO REVERSA (VERIFICADOR DE GHOST FILES NO GOOGLE DRIVE)
+  // ============================================================================
+  const handleScanGhostFiles = async () => {
+    if (!googleConnected) {
+      showToast('Vincule sua conta Google primeiro para verificar os arquivos no Drive.', 'error');
+      return;
+    }
+    if (models.length === 0) return;
+
+    setScanningGhostFiles(true);
+    let missingCount = 0;
+    const statusMap = { ...driveStatusCheck };
+
+    try {
+      // Verifica em lotes paralelos de 8 modelos por vez para ser super rápido
+      const chunkSize = 8;
+      for (let i = 0; i < models.length; i += chunkSize) {
+        const chunk = models.slice(i, i + chunkSize);
+        await Promise.all(
+          chunk.map(async (m) => {
+            if (!m.drive_file_id) {
+              statusMap[m.id] = 'missing';
+              missingCount++;
+              return;
+            }
+            try {
+              const res = await googleDriveFetch(
+                `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}?fields=id,trashed`
+              );
+              if (!res.ok) {
+                statusMap[m.id] = 'missing';
+                missingCount++;
+              } else {
+                const data = await res.json();
+                if (data.trashed) {
+                  statusMap[m.id] = 'missing';
+                  missingCount++;
+                } else {
+                  statusMap[m.id] = 'available';
+                }
+              }
+            } catch {
+              statusMap[m.id] = 'missing';
+              missingCount++;
+            }
+          })
+        );
+      }
+
+      setDriveStatusCheck(statusMap);
+      if (missingCount === 0) {
+        setOnlyGhostFilter(false);
+        showToast(`Tudo certo! Todos os ${models.length} arquivos ZIP estão íntegros no seu Google Drive.`);
+      } else {
+        showToast(
+          `Atenção: ${missingCount} arquivo(s) não foram encontrados ou estão na lixeira do Google Drive!`,
+          'error'
+        );
+      }
+    } catch (err) {
+      showToast(`Erro ao verificar Drive: ${err.message}`, 'error');
+    } finally {
+      setScanningGhostFiles(false);
+    }
+  };
+
   const openShareModalWithCurrentFilters = () => {
     const defaultTitle =
       selectedCategory !== 'Todas'
@@ -571,31 +888,71 @@ export default function App() {
     showToast('Link copiado!');
   };
 
+  // ============================================================================
+  // FILTRAGEM + ORDENAÇÃO AVANÇADA + PAGINAÇÃO
+  // ============================================================================
   const activeModelsSource = useMemo(() => {
+    let baseList = [];
+
     if (shareIdFromUrl) {
       const list = sharedCatalogData?.models || [];
       const q = visitorSearch.trim().toLowerCase();
-      if (!q) return list;
-      return list.filter(
-        (m) =>
-          m.name?.toLowerCase().includes(q) ||
-          m.description?.toLowerCase().includes(q) ||
-          m.tags?.some((t) => t.toLowerCase().includes(q))
-      );
+      baseList = !q
+        ? [...list]
+        : list.filter(
+            (m) =>
+              m.name?.toLowerCase().includes(q) ||
+              m.description?.toLowerCase().includes(q) ||
+              m.tags?.some((t) => t.toLowerCase().includes(q))
+          );
+    } else {
+      baseList = models.filter((m) => {
+        if (onlyGhostFilter && driveStatusCheck[m.id] !== 'missing') return false;
+        const matchesCat = selectedCategory === 'Todas' || m.category === selectedCategory;
+        if (!matchesCat) return false;
+        if (!debouncedQuery) return true;
+        return (
+          m.name?.toLowerCase().includes(debouncedQuery) ||
+          m.description?.toLowerCase().includes(debouncedQuery) ||
+          m.category?.toLowerCase().includes(debouncedQuery) ||
+          m.tags?.some((t) => t.toLowerCase().includes(debouncedQuery))
+        );
+      });
     }
 
-    return models.filter((m) => {
-      const matchesCat = selectedCategory === 'Todas' || m.category === selectedCategory;
-      if (!matchesCat) return false;
-      if (!debouncedQuery) return true;
-      return (
-        m.name?.toLowerCase().includes(debouncedQuery) ||
-        m.description?.toLowerCase().includes(debouncedQuery) ||
-        m.category?.toLowerCase().includes(debouncedQuery) ||
-        m.tags?.some((t) => t.toLowerCase().includes(debouncedQuery))
-      );
+    // Ordenação Avançada
+    baseList.sort((a, b) => {
+      if (sortBy === 'oldest') {
+        return new Date(a.created_at || 0) - new Date(b.created_at || 0);
+      }
+      if (sortBy === 'name_asc') {
+        return (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' });
+      }
+      if (sortBy === 'name_desc') {
+        return (b.name || '').localeCompare(a.name || '', 'pt-BR', { sensitivity: 'base' });
+      }
+      if (sortBy === 'size_desc') {
+        return Number(b.drive_file_size || 0) - Number(a.drive_file_size || 0);
+      }
+      if (sortBy === 'size_asc') {
+        return Number(a.drive_file_size || 0) - Number(b.drive_file_size || 0);
+      }
+      // Padrão: newest (Mais recentes primeiro)
+      return new Date(b.created_at || 0) - new Date(a.created_at || 0);
     });
-  }, [shareIdFromUrl, sharedCatalogData, visitorSearch, models, selectedCategory, debouncedQuery]);
+
+    return baseList;
+  }, [
+    shareIdFromUrl,
+    sharedCatalogData,
+    visitorSearch,
+    models,
+    selectedCategory,
+    debouncedQuery,
+    sortBy,
+    onlyGhostFilter,
+    driveStatusCheck
+  ]);
 
   const totalPages = useMemo(() => {
     return Math.max(1, Math.ceil(activeModelsSource.length / itemsPerPage));
@@ -613,6 +970,12 @@ export default function App() {
       ensureSignedUrlsForModels(paginatedModels);
     }
   }, [paginatedModels, ensureSignedUrlsForModels]);
+
+  useEffect(() => {
+    if (activeTab === 'fila' && queuedModels.length > 0) {
+      ensureSignedUrlsForModels(queuedModels);
+    }
+  }, [activeTab, queuedModels, ensureSignedUrlsForModels]);
 
   const pageNumbers = useMemo(() => {
     const pages = [];
@@ -937,6 +1300,8 @@ export default function App() {
       setImportForm((prev) => ({ ...prev, category: trimmed }));
     } else if (targetContext === 'edit' && editingModel) {
       setEditingModel((prev) => ({ ...prev, category: trimmed }));
+    } else if (targetContext === 'bulk') {
+      setBulkTargetCategory(trimmed);
     }
 
     setNewCategoryName('');
@@ -1082,9 +1447,6 @@ export default function App() {
     showToast('Configurações atualizadas!');
   };
 
-  // ============================================================================
-  // UPLOAD DE MÚLTIPLAS IMAGENS PARA O SUPABASE STORAGE
-  // ============================================================================
   const uploadMultipleImagesToSupabase = async (filesArray) => {
     if (!filesArray || filesArray.length === 0) return [];
     const uploadedPaths = [];
@@ -1441,9 +1803,6 @@ export default function App() {
     }
   };
 
-  // ============================================================================
-  // EDIÇÃO COM SUPORTE A ADICIONAR E REMOVER MÚLTIPLAS IMAGENS DA GALERIA
-  // ============================================================================
   const handleSaveEdit = async (e) => {
     e.preventDefault();
     if (!editingModel) return;
@@ -1454,14 +1813,12 @@ export default function App() {
         ? editingModel.keptImagePaths
         : originalPaths;
 
-      // Identifica imagens que o usuário removeu da galeria para apagar do Storage
       const removedPaths = originalPaths.filter((p) => !keptPaths.includes(p));
       if (removedPaths.length > 0) {
         await supabase.storage.from('stl-images').remove(removedPaths);
         removedPaths.forEach((p) => delete signedPathCacheRef.current[p]);
       }
 
-      // Envia novas imagens selecionadas
       const newFiles = Array.isArray(editingModel.newImageFiles) ? editingModel.newImageFiles : [];
       const newlyUploadedPaths = await uploadMultipleImagesToSupabase(newFiles);
 
@@ -1725,9 +2082,6 @@ export default function App() {
     </div>
   );
 
-  // ============================================================================
-  // COMPONENTE DE CARROSSEL INTERATIVO PARA O MODAL DE DETALHES
-  // ============================================================================
   const renderImageCarouselModalHeader = (model) => {
     const paths = getModelImagePaths(model);
     const total = paths.length;
@@ -1759,7 +2113,6 @@ export default function App() {
             </div>
           )}
 
-          {/* Setas do Carrossel se houver mais de 1 foto */}
           {total > 1 && (
             <>
               <button
@@ -1790,7 +2143,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* Barra de Miniaturas (Thumbnails) */}
         {total > 1 && (
           <div className="px-4 py-2.5 bg-[#050505] border-t border-[#141413] flex items-center gap-2 overflow-x-auto">
             {paths.map((p, idx) => {
@@ -1834,7 +2186,7 @@ export default function App() {
   }
 
   // ============================================================================
-  // RENDERIZAÇÃO DO MODO VITRINE PÚBLICA (?share=UUID)
+  // MODO VITRINE PÚBLICA (?share=UUID)
   // ============================================================================
   if (shareIdFromUrl) {
     return (
@@ -1903,18 +2255,34 @@ export default function App() {
                   )}
                 </div>
 
-                <div className="flex items-center gap-2 self-end sm:self-auto">
-                  <span className="text-xs text-[#8c877e]">Por página:</span>
-                  <select
-                    value={itemsPerPage}
-                    onChange={(e) => setItemsPerPage(Number(e.target.value))}
-                    className="px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-xs text-[#e4e0d7] cursor-pointer"
-                  >
-                    <option value={8}>8</option>
-                    <option value={12}>12</option>
-                    <option value={24}>24</option>
-                    <option value={48}>48</option>
-                  </select>
+                <div className="flex flex-wrap items-center gap-3 self-end sm:self-auto">
+                  <div className="flex items-center gap-1.5">
+                    <ArrowUpDown className="w-3.5 h-3.5 text-[#c89d66]" />
+                    <select
+                      value={sortBy}
+                      onChange={(e) => setSortBy(e.target.value)}
+                      className="px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-xs text-[#e4e0d7] cursor-pointer"
+                    >
+                      <option value="newest">Mais Recentes</option>
+                      <option value="oldest">Mais Antigos</option>
+                      <option value="name_asc">Nome (A–Z)</option>
+                      <option value="name_desc">Nome (Z–A)</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-[#8c877e]">Por página:</span>
+                    <select
+                      value={itemsPerPage}
+                      onChange={(e) => setItemsPerPage(Number(e.target.value))}
+                      className="px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-xs text-[#e4e0d7] cursor-pointer"
+                    >
+                      <option value={8}>8</option>
+                      <option value={12}>12</option>
+                      <option value={24}>24</option>
+                      <option value={48}>48</option>
+                    </select>
+                  </div>
                 </div>
               </div>
 
@@ -2126,13 +2494,17 @@ export default function App() {
             {renderLogo('w-9 h-9')}
             <div>
               <h1 className="font-bold text-base sm:text-lg text-[#e4e0d7] leading-tight tracking-tight">Biblioteca STL</h1>
-              <p className="text-[11px] text-[#8c877e] hidden md:block">Google Drive &bull; Subpastas por Categoria</p>
+              <p className="text-[11px] text-[#8c877e] hidden lg:block">Google Drive &bull; Subpastas por Categoria</p>
             </div>
           </div>
 
-          <nav className="hidden md:flex items-center gap-2">
+          <nav className="hidden md:flex items-center gap-1.5">
             <button onClick={() => setActiveTab('catalogo')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
               <Box className="w-4 h-4" /><span>Catálogo ({models.length})</span>
+            </button>
+            <button onClick={() => setActiveTab('fila')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'fila' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
+              <ListOrdered className="w-4 h-4" />
+              <span>Fila ({queuedModels.length})</span>
             </button>
             <button onClick={() => setActiveTab('upload')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'upload' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
               <Upload className="w-4 h-4" /><span>Enviar</span>
@@ -2144,12 +2516,12 @@ export default function App() {
               <Calculator className="w-4 h-4" /><span>Calculadora</span>
             </button>
             <button onClick={() => setActiveTab('configuracoes')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
-              <Settings className="w-4 h-4" /><span>Configurações</span>
+              <Settings className="w-4 h-4" /><span>Config</span>
             </button>
 
             <button
               onClick={() => supabase.auth.signOut()}
-              className="ml-2 px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 hover:bg-[#b94a48]/25 transition cursor-pointer"
+              className="ml-1 px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 hover:bg-[#b94a48]/25 transition cursor-pointer"
               title="Sair da Conta"
             >
               <LogOut className="w-4 h-4" />
@@ -2168,6 +2540,9 @@ export default function App() {
           <div className="md:hidden bg-[#0a0a0a] border-b border-[#262522] px-4 py-3 space-y-2">
             <button onClick={() => { setActiveTab('catalogo'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
               <Box className="w-4 h-4" /><span>Catálogo ({models.length})</span>
+            </button>
+            <button onClick={() => { setActiveTab('fila'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'fila' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
+              <ListOrdered className="w-4 h-4" /><span>Fila de Impressão ({queuedModels.length})</span>
             </button>
             <button onClick={() => { setActiveTab('upload'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'upload' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
               <Upload className="w-4 h-4" /><span>Enviar ZIP</span>
@@ -2221,80 +2596,201 @@ export default function App() {
       {/* Conteúdo Principal */}
       <main className="max-w-7xl mx-auto w-full px-3 sm:px-6 py-6 sm:py-8 flex-1">
         {activeTab === 'catalogo' && (
-          <div className="space-y-6">
-            <div className="flex flex-col lg:flex-row gap-4 items-stretch lg:items-center justify-between bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
-              <div className="relative w-full lg:w-64 focus-within:lg:w-96 transition-all duration-300">
-                <Search className="w-4 h-4 text-[#8c877e] absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={searchInput}
-                  onChange={(e) => setSearchInput(e.target.value)}
-                  placeholder="Buscar modelo por nome, descrição ou tag..."
-                  className="w-full pl-10 pr-9 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none focus:border-[#e4e0d7] transition-all"
-                />
-                {searchInput && (
-                  <button
-                    type="button"
-                    onClick={() => setSearchInput('')}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[#8c877e] hover:text-[#e4e0d7] cursor-pointer"
-                    title="Limpar pesquisa"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                )}
+          <div className="space-y-5">
+            {/* Barra de Filtros, Ordenação, Lote e Sincronização Reversa */}
+            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5 space-y-4">
+              <div className="flex flex-col lg:flex-row gap-3 items-stretch lg:items-center justify-between">
+                <div className="relative w-full lg:w-64 focus-within:lg:w-96 transition-all duration-300">
+                  <Search className="w-4 h-4 text-[#8c877e] absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={searchInput}
+                    onChange={(e) => setSearchInput(e.target.value)}
+                    placeholder="Buscar modelo por nome, descrição ou tag..."
+                    className="w-full pl-10 pr-9 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none focus:border-[#e4e0d7] transition-all"
+                  />
+                  {searchInput && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchInput('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-[#8c877e] hover:text-[#e4e0d7] cursor-pointer"
+                      title="Limpar pesquisa"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2.5 justify-end">
+                  {/* Seletor de Categoria */}
+                  <div className="flex items-center gap-1.5">
+                    <Filter className="w-4 h-4 text-[#c89d66] shrink-0" />
+                    <select
+                      value={selectedCategory}
+                      onChange={(e) => setSelectedCategory(e.target.value)}
+                      className="px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-xs sm:text-sm text-[#e4e0d7] focus:outline-none cursor-pointer"
+                    >
+                      <option value="Todas">Todas Categorias ({models.length})</option>
+                      {allCategories.map((cat) => (
+                        <option key={cat} value={cat}>{cat}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Seletor de Ordenação Avançada */}
+                  <div className="flex items-center gap-1.5">
+                    <ArrowUpDown className="w-4 h-4 text-[#c89d66] shrink-0" />
+                    <select
+                      value={sortBy}
+                      onChange={(e) => setSortBy(e.target.value)}
+                      className="px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-xs sm:text-sm text-[#e4e0d7] focus:outline-none cursor-pointer"
+                    >
+                      <option value="newest">Mais Recentes</option>
+                      <option value="oldest">Mais Antigos</option>
+                      <option value="name_asc">Nome (A–Z)</option>
+                      <option value="name_desc">Nome (Z–A)</option>
+                      <option value="size_desc">Maior Tamanho</option>
+                      <option value="size_asc">Menor Tamanho</option>
+                    </select>
+                  </div>
+
+                  {/* Quantidade por Página */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-[#8c877e]">Exibir:</span>
+                    <select
+                      value={itemsPerPage}
+                      onChange={(e) => setItemsPerPage(Number(e.target.value))}
+                      className="px-2.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-xs sm:text-sm text-[#e4e0d7] cursor-pointer"
+                    >
+                      <option value={8}>8</option>
+                      <option value={12}>12</option>
+                      <option value={24}>24</option>
+                      <option value={48}>48</option>
+                    </select>
+                  </div>
+                </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2.5 w-full lg:w-auto justify-end">
-                <div className="flex items-center gap-2 flex-1 sm:flex-initial">
-                  <Filter className="w-4 h-4 text-[#c89d66] shrink-0" />
-                  <select
-                    value={selectedCategory}
-                    onChange={(e) => setSelectedCategory(e.target.value)}
-                    className="w-full sm:w-52 px-3.5 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-xs sm:text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7] cursor-pointer"
+              {/* Segunda linha de ferramentas: Seleção em Lote, Ghost Files e Compartilhamento */}
+              <div className="pt-3 border-t border-[#1c1b19] flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBulkMode(!bulkMode);
+                      setSelectedModelIds([]);
+                    }}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${
+                      bulkMode
+                        ? 'bg-[#e4e0d7] text-[#000000] border-[#e4e0d7]'
+                        : 'bg-[#000000] text-[#a39e93] hover:text-[#e4e0d7] border-[#262522]'
+                    }`}
                   >
-                    <option value="Todas" className="bg-[#0a0a0a] text-[#e4e0d7]">Todas as Categorias ({models.length})</option>
-                    {allCategories.map((cat) => (
-                      <option key={cat} value={cat} className="bg-[#0a0a0a] text-[#e4e0d7]">
-                        {cat}
-                      </option>
-                    ))}
-                  </select>
+                    <CheckSquare className="w-3.5 h-3.5" />
+                    <span>{bulkMode ? 'Sair do Modo Lote' : 'Seleção em Lote'}</span>
+                  </button>
+
+                  {bulkMode && paginatedModels.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleSelectAllCurrentPage}
+                      className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#141413] text-[#e4e0d7] border border-[#262522] hover:bg-[#1f1e1c] cursor-pointer"
+                    >
+                      Selecionar/Desmarcar Página ({paginatedModels.length})
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    disabled={scanningGhostFiles}
+                    onClick={handleScanGhostFiles}
+                    className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#000000] hover:bg-[#141413] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522] flex items-center gap-1.5 cursor-pointer transition"
+                    title="Verifica se todos os arquivos ZIP cadastrados ainda existem no Google Drive"
+                  >
+                    <FileWarning className={`w-3.5 h-3.5 text-[#c89d66] ${scanningGhostFiles ? 'animate-spin' : ''}`} />
+                    <span>{scanningGhostFiles ? 'Verificando Drive...' : 'Verificar Arquivos no Drive'}</span>
+                  </button>
+
+                  {ghostCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setOnlyGhostFilter(!onlyGhostFilter)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer transition ${
+                        onlyGhostFilter
+                          ? 'bg-[#b94a48] text-white border-[#b94a48]'
+                          : 'bg-[#b94a48]/15 text-[#e89b99] border-[#b94a48]/40'
+                      }`}
+                    >
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                      <span>{onlyGhostFilter ? 'Mostrando Apenas Ausentes' : `${ghostCount} Ausente(s) no Drive`}</span>
+                    </button>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-[#8c877e] whitespace-nowrap">Por página:</span>
-                  <select
-                    value={itemsPerPage}
-                    onChange={(e) => setItemsPerPage(Number(e.target.value))}
-                    className="px-3 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-xs sm:text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7] cursor-pointer"
+                  <button
+                    type="button"
+                    onClick={openShareModalWithCurrentFilters}
+                    className="px-3.5 py-1.5 rounded-xl bg-[#c89d66] hover:bg-[#b88c56] text-[#000000] text-xs font-bold flex items-center gap-1.5 cursor-pointer transition"
                   >
-                    <option value={8}>8</option>
-                    <option value={12}>12</option>
-                    <option value={24}>24</option>
-                    <option value={48}>48</option>
-                  </select>
+                    <Share2 className="w-3.5 h-3.5" />
+                    <span>Compartilhar Vitrine</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => loadUserData(false)}
+                    title="Sincronizar catálogo"
+                    className="p-2 rounded-xl bg-[#000000] hover:bg-[#141413] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522] cursor-pointer transition"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loadingData ? 'animate-spin text-[#e4e0d7]' : ''}`} />
+                  </button>
                 </div>
-
-                <button
-                  type="button"
-                  onClick={openShareModalWithCurrentFilters}
-                  className="px-3.5 py-2.5 rounded-xl bg-[#c89d66] hover:bg-[#b88c56] text-[#000000] text-xs font-bold flex items-center gap-1.5 cursor-pointer transition shrink-0"
-                  title="Gerar link de visualização pública com o filtro escolhido"
-                >
-                  <Share2 className="w-4 h-4" />
-                  <span>Compartilhar Vitrine</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => loadUserData(false)}
-                  title="Sincronizar catálogo"
-                  className="p-2.5 rounded-xl bg-[#000000] hover:bg-[#141413] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522] cursor-pointer transition"
-                >
-                  <RefreshCw className={`w-4 h-4 ${loadingData ? 'animate-spin text-[#e4e0d7]' : ''}`} />
-                </button>
               </div>
             </div>
+
+            {/* BARRA DE AÇÕES EM LOTE QUANDO HÁ ITENS SELECIONADOS */}
+            {bulkMode && selectedModelIds.length > 0 && (
+              <div className="bg-[#141311] border border-[#c89d66] rounded-2xl p-3.5 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-2xl sticky top-20 z-20">
+                <div className="flex items-center gap-2 text-xs sm:text-sm font-bold text-[#e4e0d7]">
+                  <CheckSquare className="w-4 h-4 text-[#c89d66]" />
+                  <span>{selectedModelIds.length} modelo(s) selecionado(s)</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBulkTargetCategory(allCategories[0] || 'Geral');
+                      setBulkCategoryModalOpen(true);
+                    }}
+                    className="px-3 py-1.5 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
+                  >
+                    Mudar Categoria
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleBulkQueueChange(true)}
+                    className="px-3 py-1.5 bg-[#1f1e1c] hover:bg-[#2a2926] text-[#e4e0d7] border border-[#383632] rounded-xl text-xs font-semibold cursor-pointer"
+                  >
+                    + Fila de Impressão
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBulkDeleteModalOpen(true)}
+                    className="px-3 py-1.5 bg-[#b94a48] text-white rounded-xl text-xs font-bold cursor-pointer"
+                  >
+                    Excluir Selecionados
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedModelIds([])}
+                    className="px-2.5 py-1.5 text-xs text-[#a39e93] hover:text-white cursor-pointer"
+                  >
+                    Limpar
+                  </button>
+                </div>
+              </div>
+            )}
 
             {loadingData ? (
               <div className="py-20 text-center text-[#a39e93] flex flex-col items-center gap-3">
@@ -2307,15 +2803,15 @@ export default function App() {
                 <div className="space-y-1">
                   <h3 className="text-base font-semibold text-[#e4e0d7]">Nenhum modelo STL encontrado</h3>
                   <p className="text-xs text-[#8c877e] max-w-md mx-auto">
-                    {searchInput || selectedCategory !== 'Todas'
+                    {searchInput || selectedCategory !== 'Todas' || onlyGhostFilter
                       ? 'Nenhum modelo corresponde aos filtros aplicados.'
                       : 'Envie um novo arquivo ZIP ou importe pastas de importações/Aguardando.'}
                   </p>
                 </div>
                 <div className="flex flex-wrap justify-center gap-3 pt-2">
-                  {(searchInput || selectedCategory !== 'Todas') ? (
+                  {(searchInput || selectedCategory !== 'Todas' || onlyGhostFilter) ? (
                     <button
-                      onClick={() => { setSearchInput(''); setSelectedCategory('Todas'); }}
+                      onClick={() => { setSearchInput(''); setSelectedCategory('Todas'); setOnlyGhostFilter(false); }}
                       className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold transition cursor-pointer"
                     >
                       Limpar Filtros
@@ -2334,8 +2830,27 @@ export default function App() {
                   {paginatedModels.map((model) => {
                     const paths = getModelImagePaths(model);
                     const coverUrl = getSignedUrlForPath(paths[0]);
+                    const isSelectedBulk = selectedModelIds.includes(model.id);
+                    const isGhost = driveStatusCheck[model.id] === 'missing';
+
                     return (
-                      <div key={model.id} onClick={() => handleOpenDetails(model)} className="group bg-[#0a0a0a] border border-[#262522] hover:border-[#e4e0d7]/60 rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg">
+                      <div
+                        key={model.id}
+                        onClick={(e) => {
+                          if (bulkMode) {
+                            toggleSelectModelForBulk(model.id, e);
+                          } else {
+                            handleOpenDetails(model);
+                          }
+                        }}
+                        className={`group bg-[#0a0a0a] border rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg ${
+                          isSelectedBulk
+                            ? 'border-[#c89d66] ring-2 ring-[#c89d66]/40'
+                            : isGhost
+                              ? 'border-[#b94a48]'
+                              : 'border-[#262522] hover:border-[#e4e0d7]/60'
+                        }`}
+                      >
                         <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
                           {coverUrl ? (
                             <img
@@ -2350,15 +2865,55 @@ export default function App() {
                               <span className="text-[11px]">Sem imagem</span>
                             </div>
                           )}
-                          <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[#000000]/85 backdrop-blur text-[#e4e0d7] border border-[#e4e0d7]/30">
-                            {model.category}
-                          </span>
+
+                          {/* Checkbox do Modo Lote ou Categoria */}
+                          {bulkMode ? (
+                            <button
+                              type="button"
+                              onClick={(e) => toggleSelectModelForBulk(model.id, e)}
+                              className="absolute top-2.5 left-2.5 p-1.5 rounded-lg bg-[#000000]/90 border border-[#e4e0d7]/40 text-[#e4e0d7]"
+                            >
+                              {isSelectedBulk ? (
+                                <CheckSquare className="w-5 h-5 text-[#c89d66]" />
+                              ) : (
+                                <Square className="w-5 h-5 text-[#8c877e]" />
+                              )}
+                            </button>
+                          ) : (
+                            <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[#000000]/85 backdrop-blur text-[#e4e0d7] border border-[#e4e0d7]/30">
+                              {model.category}
+                            </span>
+                          )}
+
+                          {/* Botão Rápido da Fila de Impressão no Topo Direito */}
+                          <button
+                            type="button"
+                            onClick={(e) => handleTogglePrintQueue(model, e)}
+                            title={model.in_print_queue ? 'Na Fila de Impressão (clique para remover)' : 'Adicionar à Fila de Impressão'}
+                            className={`absolute top-2.5 right-2.5 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition cursor-pointer ${
+                              model.in_print_queue
+                                ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
+                                : 'bg-[#000000]/80 text-[#a39e93] hover:text-white border-[#262522]'
+                            }`}
+                          >
+                            <ListOrdered className="w-3 h-3" />
+                            <span>{model.in_print_queue ? 'Na Fila' : '+ Fila'}</span>
+                          </button>
+
+                          {/* Alerta de Arquivo Ausente no Drive (Ghost File) */}
+                          {isGhost && (
+                            <span className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#b94a48] text-white flex items-center gap-1">
+                              <AlertTriangle className="w-3 h-3" /> Ausente no Drive
+                            </span>
+                          )}
+
                           {paths.length > 1 && (
                             <span className="absolute bottom-2 right-2 px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#000000]/85 text-[#c89d66] border border-[#c89d66]/40 flex items-center gap-1">
                               <Images className="w-3 h-3" /> {paths.length} fotos
                             </span>
                           )}
                         </div>
+
                         <div className="p-4 flex-1 flex flex-col justify-between space-y-3">
                           <div>
                             <h3 className="font-bold text-[#e4e0d7] text-sm group-hover:text-white transition line-clamp-1">{model.name}</h3>
@@ -2463,6 +3018,129 @@ export default function App() {
                   </div>
                 </div>
               </>
+            )}
+          </div>
+        )}
+
+        {/* NOVA ABA: FILA DE IMPRESSÃO (PRINT QUEUE) */}
+        {activeTab === 'fila' && (
+          <div className="space-y-6 max-w-5xl mx-auto">
+            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-xl bg-[#c89d66] text-[#000000]">
+                  <ListOrdered className="w-6 h-6" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold text-[#e4e0d7]">Fila de Impressão ({queuedModels.length})</h2>
+                  <p className="text-xs text-[#8c877e]">
+                    Organize suas próximas impressões por prioridade e marque como concluídas após imprimir.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab('catalogo')}
+                className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold cursor-pointer"
+              >
+                + Adicionar Mais do Catálogo
+              </button>
+            </div>
+
+            {queuedModels.length === 0 ? (
+              <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-12 text-center space-y-3">
+                <ListOrdered className="w-10 h-10 text-[#5e5a52] mx-auto" />
+                <p className="text-sm font-semibold text-[#e4e0d7]">Sua Fila de Impressão está vazia</p>
+                <p className="text-xs text-[#8c877e] max-w-md mx-auto">
+                  Clique no botão <strong>"+ Fila"</strong> no canto superior direito de qualquer card no Catálogo para planejar suas próximas impressões.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {queuedModels.map((model, index) => {
+                  const paths = getModelImagePaths(model);
+                  const coverUrl = getSignedUrlForPath(paths[0]);
+                  const prio = model.queue_priority || 'Normal';
+                  return (
+                    <div
+                      key={model.id}
+                      className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 hover:border-[#e4e0d7]/40 transition"
+                    >
+                      <div className="flex items-center gap-4">
+                        <div className="w-7 h-7 rounded-lg bg-[#141413] border border-[#262522] flex items-center justify-center text-xs font-bold text-[#c89d66] shrink-0">
+                          #{index + 1}
+                        </div>
+                        <div
+                          onClick={() => handleOpenDetails(model)}
+                          className="w-20 h-14 rounded-xl bg-[#000000] border border-[#262522] overflow-hidden shrink-0 flex items-center justify-center cursor-pointer"
+                        >
+                          {coverUrl ? (
+                            <img src={coverUrl} alt={model.name} className="w-full h-full object-cover" />
+                          ) : (
+                            <Box className="w-6 h-6 text-[#5e5a52]" />
+                          )}
+                        </div>
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h3
+                              onClick={() => handleOpenDetails(model)}
+                              className="font-bold text-sm text-[#e4e0d7] hover:underline cursor-pointer"
+                            >
+                              {model.name}
+                            </h3>
+                            <span className="px-2 py-0.5 rounded text-[10px] bg-[#141413] text-[#a39e93] border border-[#262522]">
+                              {model.category}
+                            </span>
+                          </div>
+                          {model.notes && (
+                            <p className="text-xs text-[#c89d66]">Config: {model.notes}</p>
+                          )}
+                          <p className="text-[11px] text-[#8c877e]">{formatBytes(model.drive_file_size)}</p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2.5 justify-end border-t sm:border-t-0 pt-3 sm:pt-0 border-[#1c1b19]">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs text-[#8c877e]">Prioridade:</span>
+                          <select
+                            value={prio}
+                            onChange={(e) => handleChangeQueuePriority(model, e.target.value)}
+                            className={`px-2.5 py-1.5 rounded-xl text-xs font-bold border cursor-pointer ${
+                              prio === 'Alta'
+                                ? 'bg-[#b94a48]/20 text-[#e89b99] border-[#b94a48]/40'
+                                : prio === 'Baixa'
+                                  ? 'bg-[#141413] text-[#8c877e] border-[#262522]'
+                                  : 'bg-[#c89d66]/20 text-[#c89d66] border-[#c89d66]/40'
+                            }`}
+                          >
+                            <option value="Alta" className="bg-[#0a0a0a] text-[#e4e0d7]">Alta</option>
+                            <option value="Normal" className="bg-[#0a0a0a] text-[#e4e0d7]">Normal</option>
+                            <option value="Baixa" className="bg-[#0a0a0a] text-[#e4e0d7]">Baixa</option>
+                          </select>
+                        </div>
+
+                        <a
+                          href={model.drive_file_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-3 py-1.5 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold inline-flex items-center gap-1.5"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5 text-[#c89d66]" />
+                          <span>Baixar ZIP</span>
+                        </a>
+
+                        <button
+                          type="button"
+                          onClick={(e) => handleTogglePrintQueue(model, e)}
+                          className="px-3.5 py-1.5 bg-[#4d7c5b] hover:bg-[#3f684b] text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Concluir Impressão</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </div>
         )}
@@ -2916,6 +3594,69 @@ export default function App() {
         )}
       </main>
 
+      {/* MODAL MUDAR CATEGORIA EM LOTE */}
+      {bulkCategoryModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
+          <form onSubmit={handleConfirmBulkCategoryChange} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-md w-full p-6 space-y-4">
+            <h3 className="font-bold text-[#e4e0d7]">
+              Mover {selectedModelIds.length} Modelo(s) de Categoria
+            </h3>
+            <p className="text-xs text-[#8c877e]">
+              Os registros selecionados serão atualizados e seus respectivos arquivos ZIP serão movidos para a subpasta correspondente no Google Drive.
+            </p>
+            {renderCategorySelector(bulkTargetCategory, (val) => setBulkTargetCategory(val), 'bulk')}
+            {uploading && (
+              <div className="p-2.5 rounded-xl bg-[#141413] text-xs text-[#e4e0d7] flex items-center gap-2">
+                <RefreshCw className="w-4 h-4 animate-spin" />
+                <span>{uploadStep || 'Movendo modelos...'}</span>
+              </div>
+            )}
+            <div className="flex justify-end gap-2 pt-2">
+              <button type="button" disabled={uploading} onClick={() => setBulkCategoryModalOpen(false)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">
+                Cancelar
+              </button>
+              <button type="submit" disabled={uploading} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">
+                Confirmar Mudança
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* MODAL EXCLUIR EM LOTE */}
+      {bulkDeleteModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
+          <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-md w-full p-6 space-y-4">
+            <h3 className="font-bold text-[#e4e0d7]">
+              Excluir {selectedModelIds.length} modelo(s) selecionado(s)?
+            </h3>
+            <label className="flex items-start gap-2.5 p-3 rounded-xl bg-[#b94a48]/15 border border-[#b94a48]/30 text-xs text-[#e89b99] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={bulkDeleteAlsoDrive}
+                onChange={(e) => setBulkDeleteAlsoDrive(e.target.checked)}
+                className="mt-0.5 accent-[#b94a48]"
+              />
+              <span>Excluir também os arquivos ZIP correspondentes do Google Drive.</span>
+            </label>
+            {uploading && (
+              <div className="p-2.5 rounded-xl bg-[#141413] text-xs text-[#e4e0d7] flex items-center gap-2">
+                <RefreshCw className="w-4 h-4 animate-spin" />
+                <span>{uploadStep || 'Excluindo em lote...'}</span>
+              </div>
+            )}
+            <div className="flex justify-end gap-2 pt-2">
+              <button type="button" disabled={uploading} onClick={() => setBulkDeleteModalOpen(false)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">
+                Cancelar
+              </button>
+              <button type="button" disabled={uploading} onClick={handleConfirmBulkDelete} className="px-4 py-2 bg-[#b94a48] text-white rounded-xl text-xs font-bold cursor-pointer">
+                Confirmar Exclusão
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MODAL PARA CRIAR E GERENCIAR LINKS COMPARTILHADOS */}
       {shareModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 overflow-y-auto">
@@ -3111,24 +3852,54 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL DETALHES DO PROPRIETÁRIO (COM CARROSSEL DE MÚLTIPLAS IMAGENS) */}
+      {/* MODAL DETALHES DO PROPRIETÁRIO */}
       {selectedModel && (
         <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
           <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
             {renderImageCarouselModalHeader(selectedModel)}
             <div className="p-4 sm:p-6 space-y-4 max-h-[55vh] overflow-y-auto">
-              <div className="flex justify-between items-start">
-                <div><span className="px-2.5 py-1 rounded-md text-xs bg-[#e4e0d7]/15 text-[#e4e0d7]">{selectedModel.category}</span><h2 className="text-lg font-bold text-[#e4e0d7] mt-2">{selectedModel.name}</h2></div>
-                <span className="text-xs text-[#8c877e]">{formatBytes(selectedModel.drive_file_size)}</span>
+              <div className="flex justify-between items-start gap-2">
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="px-2.5 py-1 rounded-md text-xs bg-[#e4e0d7]/15 text-[#e4e0d7]">{selectedModel.category}</span>
+                    {driveStatusCheck[selectedModel.id] === 'missing' && (
+                      <span className="px-2.5 py-1 rounded-md text-xs bg-[#b94a48] text-white font-bold flex items-center gap-1">
+                        <AlertTriangle className="w-3.5 h-3.5" /> Arquivo ZIP não encontrado no Google Drive
+                      </span>
+                    )}
+                  </div>
+                  <h2 className="text-lg font-bold text-[#e4e0d7] mt-2">{selectedModel.name}</h2>
+                </div>
+                <span className="text-xs text-[#8c877e] shrink-0">{formatBytes(selectedModel.drive_file_size)}</span>
               </div>
+
               <p className="text-sm text-[#d5d0c5]">{selectedModel.description || 'Sem descrição.'}</p>
+
               {selectedModel.notes && (
                 <div className="p-3 rounded-xl bg-[#000000] border border-[#262522] text-xs text-[#a39e93]">
                   <strong className="text-[#e4e0d7]">Observações:</strong> {selectedModel.notes}
                 </div>
               )}
-              <div className="flex justify-between pt-2 border-t border-[#1c1b19]">
-                <a href={selectedModel.drive_file_url} target="_blank" rel="noreferrer" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold inline-flex items-center gap-2"><ExternalLink className="w-4 h-4" /> Abrir ZIP no Drive</a>
+
+              <div className="flex flex-wrap justify-between items-center gap-2 pt-2 border-t border-[#1c1b19]">
+                <div className="flex flex-wrap gap-2">
+                  <a href={selectedModel.drive_file_url} target="_blank" rel="noreferrer" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold inline-flex items-center gap-2">
+                    <ExternalLink className="w-4 h-4" /> Abrir ZIP no Drive
+                  </a>
+                  <button
+                    type="button"
+                    onClick={(e) => handleTogglePrintQueue(selectedModel, e)}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer ${
+                      selectedModel.in_print_queue
+                        ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
+                        : 'bg-[#141413] text-[#e4e0d7] border-[#262522]'
+                    }`}
+                  >
+                    <ListOrdered className="w-4 h-4" />
+                    <span>{selectedModel.in_print_queue ? 'Na Fila de Impressão' : '+ Fila de Impressão'}</span>
+                  </button>
+                </div>
+
                 <div className="flex gap-2">
                   <button
                     onClick={() => {
@@ -3145,7 +3916,9 @@ export default function App() {
                   >
                     Editar / Galeria
                   </button>
-                  <button onClick={() => { setDeleteConfirmModel(selectedModel); setDeleteAlsoFromDrive(false); }} className="px-3.5 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs cursor-pointer">Excluir</button>
+                  <button onClick={() => { setDeleteConfirmModel(selectedModel); setDeleteAlsoFromDrive(false); }} className="px-3.5 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs cursor-pointer">
+                    Excluir
+                  </button>
                 </div>
               </div>
             </div>
@@ -3159,7 +3932,7 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL DE EDIÇÃO COM GESTÃO DE GALERIA DE MÚLTIPLAS IMAGENS */}
+      {/* MODAL DE EDIÇÃO */}
       {editingModel && (
         <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 overflow-y-auto">
           <form onSubmit={handleSaveEdit} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4 my-auto max-h-[92vh] overflow-y-auto">
@@ -3170,7 +3943,6 @@ export default function App() {
             <div><label className="block text-xs text-[#a39e93] mb-1">Tags (separadas por vírgula)</label><input type="text" value={editingModel.tagsInput} onChange={(e) => setEditingModel({ ...editingModel, tagsInput: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
             <div><label className="block text-xs text-[#a39e93] mb-1">Observações de Impressão</label><input type="text" value={editingModel.notes || ''} onChange={(e) => setEditingModel({ ...editingModel, notes: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
 
-            {/* Galeria de Imagens Atuais (com opção de remover individualmente ou definir capa) */}
             {editingModel.keptImagePaths?.length > 0 && (
               <div className="space-y-2">
                 <label className="block text-xs font-semibold text-[#e4e0d7]">
@@ -3272,7 +4044,7 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL DE IMPORTAÇÃO COMPLETO (COM SUPORTE A MÚLTIPLAS IMAGENS) */}
+      {/* MODAL DE IMPORTAÇÃO COMPLETO */}
       {importingFile && (
         <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 overflow-y-auto">
           <form onSubmit={handleConfirmImport} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-xl w-full p-6 space-y-4 my-auto max-h-[92vh] overflow-y-auto">
