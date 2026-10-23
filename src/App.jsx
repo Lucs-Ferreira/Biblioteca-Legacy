@@ -5,7 +5,7 @@ import {
   Trash2, Edit3, Eye, CheckCircle2, AlertTriangle, Folder,
   HardDrive, ShieldCheck, RefreshCw, X, Check, FileArchive,
   LogOut, FolderPlus, Tag, Calculator, Menu, Filter, ArrowRight,
-  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Share2, Copy, Link2
+  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Share2, Copy, Link2, Images
 } from 'lucide-react';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
@@ -37,16 +37,16 @@ function formatBytes(bytes = 0) {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
 
-function formatDate(isoString) {
-  if (!isoString) return '—';
-  try {
-    return new Date(isoString).toLocaleDateString('pt-BR', {
-      day: '2-digit', month: '2-digit', year: 'numeric',
-      hour: '2-digit', minute: '2-digit'
-    });
-  } catch {
-    return '—';
+// Helper que retorna sempre o array de caminhos de imagem de um modelo (compatível com modelos antigos e novos)
+function getModelImagePaths(model) {
+  if (!model) return [];
+  if (Array.isArray(model.image_paths) && model.image_paths.length > 0) {
+    return model.image_paths.filter(Boolean);
   }
+  if (model.image_path) {
+    return [model.image_path];
+  }
+  return [];
 }
 
 async function loadJSZip() {
@@ -62,19 +62,16 @@ async function loadJSZip() {
 }
 
 export default function App() {
-  // Detecta se a URL possui um parâmetro ?share=UUID (Modo Vitrine Pública Sem Login)
   const [shareIdFromUrl] = useState(() => {
     const params = new URLSearchParams(window.location.search);
     return params.get('share') || null;
   });
 
-  // Estados exclusivos do Modo Vitrine Pública (Visitante)
   const [sharedCatalogData, setSharedCatalogData] = useState(null);
   const [sharedLoading, setSharedLoading] = useState(Boolean(shareIdFromUrl));
   const [sharedError, setSharedError] = useState('');
   const [visitorSearch, setVisitorSearch] = useState('');
 
-  // Estados de Autenticação do Proprietário
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(!shareIdFromUrl);
   const [email, setEmail] = useState('');
@@ -90,7 +87,8 @@ export default function App() {
   const refreshPromiseRef = useRef(null);
   const loadedUserIdRef = useRef(null);
   const awaitingLoadedRef = useRef(false);
-  const signedUrlsCacheRef = useRef({});
+  // Cache de URLs assinadas indexado pelo caminho do arquivo (path -> signedUrl)
+  const signedPathCacheRef = useRef({});
 
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -130,10 +128,9 @@ export default function App() {
   });
 
   const [models, setModels] = useState([]);
-  const [signedUrls, setSignedUrls] = useState({});
+  const [pathUrls, setPathUrls] = useState({});
   const [loadingData, setLoadingData] = useState(false);
 
-  // Estados de Compartilhamento de Links com Filtro Travado
   const [sharedLinks, setSharedLinks] = useState([]);
   const [shareModalOpen, setShareModalOpen] = useState(false);
   const [shareForm, setShareForm] = useState({
@@ -153,6 +150,7 @@ export default function App() {
   const [toast, setToast] = useState(null);
 
   const [selectedModel, setSelectedModel] = useState(null);
+  const [activeImageIndex, setActiveImageIndex] = useState(0);
   const [lightboxUrl, setLightboxUrl] = useState(null);
   const [editingModel, setEditingModel] = useState(null);
   const [deleteConfirmModel, setDeleteConfirmModel] = useState(null);
@@ -172,7 +170,7 @@ export default function App() {
     tags: '',
     notes: '',
     zipFile: null,
-    imageFile: null
+    imageFiles: []
   });
   const [uploading, setUploading] = useState(false);
   const [uploadStep, setUploadStep] = useState('');
@@ -192,7 +190,7 @@ export default function App() {
     category: 'Geral',
     tags: '',
     notes: '',
-    imageFile: null
+    imageFiles: []
   });
 
   const [newMaterialModal, setNewMaterialModal] = useState(false);
@@ -224,38 +222,48 @@ export default function App() {
     return Array.from(new Set([...BASE_CATEGORIES, ...custom, ...fromModels]));
   }, [settings.custom_categories, models]);
 
-  // Busca em lote as URLs assinadas das imagens para a página atual (funciona tanto logado quanto no modo vitrine)
-  const ensureSignedUrlsForModels = useCallback(async (modelsToLoad) => {
-    if (!supabase || !modelsToLoad?.length) return;
-
-    const missingModels = modelsToLoad.filter(
-      (m) => m.image_path && !signedUrlsCacheRef.current[m.id]
+  // Gera URLs assinadas em lote para qualquer lista de paths do Supabase Storage
+  const ensureSignedUrlsForPaths = useCallback(async (pathsList) => {
+    if (!supabase || !pathsList?.length) return;
+    const uniqueMissing = Array.from(
+      new Set(pathsList.filter((p) => p && !signedPathCacheRef.current[p]))
     );
-    if (missingModels.length === 0) return;
+    if (uniqueMissing.length === 0) return;
 
-    const paths = missingModels.map((m) => m.image_path);
     const { data: signedList } = await supabase.storage
       .from('stl-images')
-      .createSignedUrls(paths, 3600);
+      .createSignedUrls(uniqueMissing, 3600);
 
     if (signedList && Array.isArray(signedList)) {
-      const newUrls = {};
-      signedList.forEach((item, index) => {
-        const model = missingModels[index];
-        if (model && item?.signedUrl) {
-          signedUrlsCacheRef.current[model.id] = item.signedUrl;
-          newUrls[model.id] = item.signedUrl;
+      const added = {};
+      signedList.forEach((item, idx) => {
+        const path = uniqueMissing[idx];
+        if (path && item?.signedUrl) {
+          signedPathCacheRef.current[path] = item.signedUrl;
+          added[path] = item.signedUrl;
         }
       });
-      if (Object.keys(newUrls).length > 0) {
-        setSignedUrls((prev) => ({ ...prev, ...newUrls }));
+      if (Object.keys(added).length > 0) {
+        setPathUrls((prev) => ({ ...prev, ...added }));
       }
     }
   }, []);
 
-  // ============================================================================
-  // CARREGAMENTO DO MODO VITRINE PÚBLICA (?share=UUID) SEM LOGIN E SEM DRIVE
-  // ============================================================================
+  const ensureSignedUrlsForModels = useCallback(async (modelsToLoad) => {
+    if (!modelsToLoad?.length) return;
+    const allPaths = [];
+    modelsToLoad.forEach((m) => {
+      const paths = getModelImagePaths(m);
+      paths.forEach((p) => allPaths.push(p));
+    });
+    await ensureSignedUrlsForPaths(allPaths);
+  }, [ensureSignedUrlsForPaths]);
+
+  const getSignedUrlForPath = (path) => {
+    if (!path) return null;
+    return pathUrls[path] || signedPathCacheRef.current[path] || null;
+  };
+
   useEffect(() => {
     if (!shareIdFromUrl || !supabase) return;
 
@@ -280,9 +288,6 @@ export default function App() {
     fetchPublicSharedCatalog();
   }, [shareIdFromUrl]);
 
-  // ============================================================================
-  // GERENCIAMENTO SILENCIOSO DE TOKENS DO PROPRIETÁRIO
-  // ============================================================================
   const saveTokenData = (accessToken, expiresInSec = 3500, newRefreshToken = null) => {
     const expiryTime = Date.now() + expiresInSec * 1000;
     setGoogleToken(accessToken);
@@ -366,7 +371,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (shareIdFromUrl) return; // Visitante não carrega scripts do Google Drive
+    if (shareIdFromUrl) return;
     const script = document.createElement('script');
     script.src = 'https://accounts.google.com/gsi/client';
     script.async = true;
@@ -390,7 +395,7 @@ export default function App() {
       if (event === 'SIGNED_OUT') {
         loadedUserIdRef.current = null;
         awaitingLoadedRef.current = false;
-        signedUrlsCacheRef.current = {};
+        signedPathCacheRef.current = {};
         setModels([]);
         setSession(null);
       } else if (newSession?.user?.id !== loadedUserIdRef.current) {
@@ -499,9 +504,6 @@ export default function App() {
     }
   };
 
-  // ============================================================================
-  // CRIAÇÃO E GERENCIAMENTO DE LINKS COMPARTILHADOS COM FILTRO TRAVADO
-  // ============================================================================
   const openShareModalWithCurrentFilters = () => {
     const defaultTitle =
       selectedCategory !== 'Todas'
@@ -548,7 +550,7 @@ export default function App() {
       await navigator.clipboard.writeText(shareUrl).catch(() => {});
       showToast('Link da vitrine criado e copiado para a área de transferência!');
     } catch (err) {
-      showToast(`Erro ao criar link (verifique se executou o SQL no Supabase): ${err.message}`, 'error');
+      showToast(`Erro ao criar link: ${err.message}`, 'error');
     } finally {
       setCreatingShareLink(false);
     }
@@ -559,7 +561,7 @@ export default function App() {
     const { error } = await supabase.from('shared_catalog_links').delete().eq('id', id);
     if (!error) {
       setSharedLinks((prev) => prev.filter((l) => l.id !== id));
-      showToast('Link revogado e excluído! Ninguém mais poderá acessá-lo.');
+      showToast('Link revogado e excluído!');
     }
   };
 
@@ -569,9 +571,6 @@ export default function App() {
     showToast('Link copiado!');
   };
 
-  // ============================================================================
-  // FILTRAGEM E PAGINAÇÃO (TANTO PARA PROPRIETÁRIO QUANTO PARA VISITANTE)
-  // ============================================================================
   const activeModelsSource = useMemo(() => {
     if (shareIdFromUrl) {
       const list = sharedCatalogData?.models || [];
@@ -1083,6 +1082,29 @@ export default function App() {
     showToast('Configurações atualizadas!');
   };
 
+  // ============================================================================
+  // UPLOAD DE MÚLTIPLAS IMAGENS PARA O SUPABASE STORAGE
+  // ============================================================================
+  const uploadMultipleImagesToSupabase = async (filesArray) => {
+    if (!filesArray || filesArray.length === 0) return [];
+    const uploadedPaths = [];
+
+    for (let i = 0; i < filesArray.length; i++) {
+      const file = filesArray[i];
+      setUploadStep(`Enviando imagem ${i + 1} de ${filesArray.length} para o Supabase...`);
+      const ext = file.name.split('.').pop();
+      const fileName = `${session.user.id}/${Date.now()}-${i}-${Math.random().toString(36).substring(2, 7)}.${ext}`;
+      const { error: storageErr } = await supabase.storage
+        .from('stl-images')
+        .upload(fileName, file, { upsert: false });
+
+      if (storageErr) throw new Error(`Falha ao salvar imagem "${file.name}": ${storageErr.message}`);
+      uploadedPaths.push(fileName);
+    }
+
+    return uploadedPaths;
+  };
+
   const handleUploadNewModel = async (e) => {
     e.preventDefault();
     if (!settings.root_folder_id) {
@@ -1141,7 +1163,7 @@ export default function App() {
       await completeDatabaseRegistration(uploadedDriveData, targetFolderId, uploadForm);
 
       setUploadForm({
-        name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFile: null
+        name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFiles: []
       });
       setPendingRecovery(null);
       showToast(`Modelo enviado para o Drive e catalogado com sucesso!`);
@@ -1165,21 +1187,11 @@ export default function App() {
   };
 
   const completeDatabaseRegistration = async (driveData, folderId, formValues) => {
-    let imagePath = null;
+    const filesToUpload = Array.isArray(formValues.imageFiles) ? formValues.imageFiles : [];
+    const uploadedPaths = await uploadMultipleImagesToSupabase(filesToUpload);
+    const primaryImagePath = uploadedPaths[0] || null;
 
-    if (formValues.imageFile) {
-      setUploadStep('Enviando imagem de referência ao bucket privado do Supabase...');
-      const ext = formValues.imageFile.name.split('.').pop();
-      const fileName = `${session.user.id}/${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
-      const { error: storageErr } = await supabase.storage
-        .from('stl-images')
-        .upload(fileName, formValues.imageFile, { upsert: false });
-
-      if (storageErr) throw new Error(`Falha ao salvar imagem no Supabase: ${storageErr.message}`);
-      imagePath = fileName;
-    }
-
-    setUploadStep('Salvando metadados no catálogo...');
+    setUploadStep('Salvando metadados e galeria no catálogo...');
     const tagsArray = formValues.tags
       ? formValues.tags.split(',').map((t) => t.trim()).filter(Boolean)
       : [];
@@ -1191,7 +1203,8 @@ export default function App() {
       category: formValues.category || 'Geral',
       tags: tagsArray,
       notes: formValues.notes.trim(),
-      image_path: imagePath,
+      image_path: primaryImagePath,
+      image_paths: uploadedPaths,
       drive_file_id: driveData.id,
       drive_file_name: driveData.name,
       drive_file_url: driveData.webViewLink || `https://drive.google.com/file/d/${driveData.id}/view`,
@@ -1213,7 +1226,7 @@ export default function App() {
       );
       setPendingRecovery(null);
       setUploadForm({
-        name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFile: null
+        name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFiles: []
       });
       showToast('Cadastro recuperado e concluído com sucesso!');
       setActiveTab('catalogo');
@@ -1418,33 +1431,42 @@ export default function App() {
 
   const handleOpenDetails = (model) => {
     setSelectedModel(model);
+    setActiveImageIndex(0);
+    const paths = getModelImagePaths(model);
+    if (paths.length > 0) {
+      ensureSignedUrlsForPaths(paths);
+    }
     if (googleConnected && !shareIdFromUrl) {
       verifyDriveFileAvailability(model);
     }
   };
 
+  // ============================================================================
+  // EDIÇÃO COM SUPORTE A ADICIONAR E REMOVER MÚLTIPLAS IMAGENS DA GALERIA
+  // ============================================================================
   const handleSaveEdit = async (e) => {
     e.preventDefault();
     if (!editingModel) return;
     setUploading(true);
     try {
-      let imagePath = editingModel.image_path;
-      if (editingModel.newImageFile) {
-        const ext = editingModel.newImageFile.name.split('.').pop();
-        const fileName = `${session.user.id}/${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
-        
-        const { error: upErr } = await supabase.storage
-          .from('stl-images')
-          .upload(fileName, editingModel.newImageFile);
-        if (upErr) throw upErr;
+      const originalPaths = getModelImagePaths(editingModel.originalModel || editingModel);
+      const keptPaths = Array.isArray(editingModel.keptImagePaths)
+        ? editingModel.keptImagePaths
+        : originalPaths;
 
-        if (editingModel.image_path) {
-          await supabase.storage.from('stl-images').remove([editingModel.image_path]);
-        }
-
-        delete signedUrlsCacheRef.current[editingModel.id];
-        imagePath = fileName;
+      // Identifica imagens que o usuário removeu da galeria para apagar do Storage
+      const removedPaths = originalPaths.filter((p) => !keptPaths.includes(p));
+      if (removedPaths.length > 0) {
+        await supabase.storage.from('stl-images').remove(removedPaths);
+        removedPaths.forEach((p) => delete signedPathCacheRef.current[p]);
       }
+
+      // Envia novas imagens selecionadas
+      const newFiles = Array.isArray(editingModel.newImageFiles) ? editingModel.newImageFiles : [];
+      const newlyUploadedPaths = await uploadMultipleImagesToSupabase(newFiles);
+
+      const finalImagePaths = [...keptPaths, ...newlyUploadedPaths];
+      const primaryImagePath = finalImagePaths[0] || null;
 
       const tagsArray = typeof editingModel.tagsInput === 'string'
         ? editingModel.tagsInput.split(',').map((t) => t.trim()).filter(Boolean)
@@ -1457,14 +1479,20 @@ export default function App() {
           description: editingModel.description.trim(),
           category: editingModel.category,
           tags: tagsArray,
-          notes: editingModel.notes.trim(),
-          image_path: imagePath,
+          notes: (editingModel.notes || '').trim(),
+          image_path: primaryImagePath,
+          image_paths: finalImagePaths,
           updated_at: new Date().toISOString()
         })
         .eq('id', editingModel.id);
 
       if (error) throw error;
-      showToast('Cadastro atualizado com sucesso!');
+
+      if (newlyUploadedPaths.length > 0) {
+        await ensureSignedUrlsForPaths(newlyUploadedPaths);
+      }
+
+      showToast('Cadastro e galeria de imagens atualizados com sucesso!');
       setEditingModel(null);
       setSelectedModel(null);
       loadUserData(true);
@@ -1472,6 +1500,7 @@ export default function App() {
       showToast(`Erro ao atualizar: ${err.message}`, 'error');
     } finally {
       setUploading(false);
+      setUploadStep('');
     }
   };
 
@@ -1502,8 +1531,10 @@ export default function App() {
         }
       }
 
-      if (deleteConfirmModel.image_path) {
-        await supabase.storage.from('stl-images').remove([deleteConfirmModel.image_path]);
+      const allPathsToDelete = getModelImagePaths(deleteConfirmModel);
+      if (allPathsToDelete.length > 0) {
+        await supabase.storage.from('stl-images').remove(allPathsToDelete);
+        allPathsToDelete.forEach((p) => delete signedPathCacheRef.current[p]);
       }
 
       const { error } = await supabase
@@ -1513,7 +1544,6 @@ export default function App() {
 
       if (error) throw error;
 
-      delete signedUrlsCacheRef.current[deleteConfirmModel.id];
       setModels((prev) => prev.filter((m) => m.id !== deleteConfirmModel.id));
 
       showToast(
@@ -1695,6 +1725,100 @@ export default function App() {
     </div>
   );
 
+  // ============================================================================
+  // COMPONENTE DE CARROSSEL INTERATIVO PARA O MODAL DE DETALHES
+  // ============================================================================
+  const renderImageCarouselModalHeader = (model) => {
+    const paths = getModelImagePaths(model);
+    const total = paths.length;
+    const safeIdx = total > 0 ? Math.min(activeImageIndex, total - 1) : 0;
+    const currentUrl = total > 0 ? getSignedUrlForPath(paths[safeIdx]) : null;
+
+    return (
+      <div className="bg-[#000000] border-b border-[#1c1b19]">
+        <div className="aspect-video relative flex items-center justify-center overflow-hidden">
+          {currentUrl ? (
+            <>
+              <img
+                src={currentUrl}
+                alt={`${model.name} - Foto ${safeIdx + 1}`}
+                className="w-full h-full object-contain"
+              />
+              <button
+                type="button"
+                onClick={() => setLightboxUrl(currentUrl)}
+                className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-[#000000]/85 text-[#e4e0d7] text-xs flex items-center gap-1.5 border border-[#e4e0d7]/30 cursor-pointer hover:bg-[#141413]"
+              >
+                <Eye className="w-4 h-4" /> Ampliar ({safeIdx + 1}/{total})
+              </button>
+            </>
+          ) : (
+            <div className="text-[#5e5a52] text-xs flex flex-col items-center gap-1">
+              <Box className="w-10 h-10" />
+              <span>Sem imagem</span>
+            </div>
+          )}
+
+          {/* Setas do Carrossel se houver mais de 1 foto */}
+          {total > 1 && (
+            <>
+              <button
+                type="button"
+                onClick={() => setActiveImageIndex((prev) => (prev - 1 + total) % total)}
+                className="absolute left-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-[#000000]/80 hover:bg-[#e4e0d7] text-[#e4e0d7] hover:text-[#000000] border border-[#262522] cursor-pointer transition"
+                title="Foto Anterior"
+              >
+                <ChevronLeft className="w-5 h-5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveImageIndex((prev) => (prev + 1) % total)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-[#000000]/80 hover:bg-[#e4e0d7] text-[#e4e0d7] hover:text-[#000000] border border-[#262522] cursor-pointer transition"
+                title="Próxima Foto"
+              >
+                <ChevronRight className="w-5 h-5" />
+              </button>
+            </>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setSelectedModel(null)}
+            className="absolute top-3 right-3 p-2 rounded-full bg-[#000000]/80 text-[#a39e93] hover:text-white cursor-pointer"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Barra de Miniaturas (Thumbnails) */}
+        {total > 1 && (
+          <div className="px-4 py-2.5 bg-[#050505] border-t border-[#141413] flex items-center gap-2 overflow-x-auto">
+            {paths.map((p, idx) => {
+              const thumbUrl = getSignedUrlForPath(p);
+              const isSelected = idx === safeIdx;
+              return (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setActiveImageIndex(idx)}
+                  className={`w-16 h-12 rounded-lg overflow-hidden border-2 shrink-0 transition cursor-pointer ${
+                    isSelected ? 'border-[#c89d66] scale-105' : 'border-[#262522] opacity-60 hover:opacity-100'
+                  }`}
+                >
+                  {thumbUrl ? (
+                    <img src={thumbUrl} alt={`Miniatura ${idx + 1}`} className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full bg-[#141413]" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     return (
       <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex items-center justify-center p-6">
@@ -1710,7 +1834,7 @@ export default function App() {
   }
 
   // ============================================================================
-  // RENDERIZAÇÃO DO MODO VITRINE PÚBLICA (?share=UUID) — SEM LOGIN E SEM DRIVE
+  // RENDERIZAÇÃO DO MODO VITRINE PÚBLICA (?share=UUID)
   // ============================================================================
   if (shareIdFromUrl) {
     return (
@@ -1758,7 +1882,6 @@ export default function App() {
             </div>
           ) : (
             <>
-              {/* Barra de busca interna restrita apenas aos itens que o proprietário liberou neste link */}
               <div className="flex flex-col sm:flex-row gap-4 items-stretch sm:items-center justify-between bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4">
                 <div className="relative w-full sm:w-80 focus-within:sm:w-96 transition-all duration-300">
                   <Search className="w-4 h-4 text-[#8c877e] absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -1803,17 +1926,18 @@ export default function App() {
                 <>
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-5">
                     {paginatedModels.map((model) => {
-                      const imgUrl = signedUrls[model.id] || signedUrlsCacheRef.current[model.id];
+                      const paths = getModelImagePaths(model);
+                      const coverUrl = getSignedUrlForPath(paths[0]);
                       return (
                         <div
                           key={model.id}
-                          onClick={() => setSelectedModel(model)}
+                          onClick={() => handleOpenDetails(model)}
                           className="group bg-[#0a0a0a] border border-[#262522] hover:border-[#e4e0d7]/60 rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg"
                         >
                           <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
-                            {imgUrl ? (
+                            {coverUrl ? (
                               <img
-                                src={imgUrl}
+                                src={coverUrl}
                                 alt={model.name}
                                 loading="lazy"
                                 className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
@@ -1827,6 +1951,11 @@ export default function App() {
                             <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[#000000]/85 backdrop-blur text-[#e4e0d7] border border-[#e4e0d7]/30">
                               {model.category}
                             </span>
+                            {paths.length > 1 && (
+                              <span className="absolute bottom-2 right-2 px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#000000]/85 text-[#c89d66] border border-[#c89d66]/40 flex items-center gap-1">
+                                <Images className="w-3 h-3" /> {paths.length} fotos
+                              </span>
+                            )}
                           </div>
                           <div className="p-4 flex-1 flex flex-col justify-between space-y-3">
                             <div>
@@ -1848,7 +1977,7 @@ export default function App() {
                                 </div>
                               )}
                               <div className="flex items-center justify-end text-[11px] text-[#e4e0d7] font-semibold">
-                                <span>Ver Foto e Detalhes &rarr;</span>
+                                <span>Ver Fotos e Detalhes &rarr;</span>
                               </div>
                             </div>
                           </div>
@@ -1857,7 +1986,6 @@ export default function App() {
                     })}
                   </div>
 
-                  {/* Paginação do Visitante */}
                   <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
                     <div className="text-xs text-[#8c877e]">
                       Mostrando{' '}
@@ -1904,35 +2032,10 @@ export default function App() {
           )}
         </main>
 
-        {/* Modal de Detalhes Somente Leitura para o Visitante */}
         {selectedModel && (
           <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
-              <div className="aspect-video bg-[#000000] relative flex items-center justify-center border-b border-[#1c1b19]">
-                {(signedUrls[selectedModel.id] || signedUrlsCacheRef.current[selectedModel.id]) ? (
-                  <>
-                    <img
-                      src={signedUrls[selectedModel.id] || signedUrlsCacheRef.current[selectedModel.id]}
-                      alt={selectedModel.name}
-                      className="w-full h-full object-contain"
-                    />
-                    <button
-                      onClick={() => setLightboxUrl(signedUrls[selectedModel.id] || signedUrlsCacheRef.current[selectedModel.id])}
-                      className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-[#000000]/85 text-[#e4e0d7] text-xs flex items-center gap-1.5 border border-[#e4e0d7]/30 cursor-pointer"
-                    >
-                      <Eye className="w-4 h-4" /> Ampliar Imagem
-                    </button>
-                  </>
-                ) : (
-                  <div className="text-[#5e5a52] text-xs">Sem imagem</div>
-                )}
-                <button
-                  onClick={() => setSelectedModel(null)}
-                  className="absolute top-3 right-3 p-2 rounded-full bg-[#000000]/80 text-[#a39e93] cursor-pointer"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
+              {renderImageCarouselModalHeader(selectedModel)}
               <div className="p-5 sm:p-6 space-y-4">
                 <div>
                   <span className="px-2.5 py-1 rounded-md text-xs bg-[#e4e0d7]/15 text-[#e4e0d7]">
@@ -1964,9 +2067,6 @@ export default function App() {
     );
   }
 
-  // ============================================================================
-  // FLUXO NORMAL DO PROPRIETÁRIO (COM LOGIN)
-  // ============================================================================
   if (authLoading) {
     return (
       <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex items-center justify-center">
@@ -2175,7 +2275,6 @@ export default function App() {
                   </select>
                 </div>
 
-                {/* BOTÃO PARA GERAR LINK COMPARTILHADO COM O FILTRO ATUAL */}
                 <button
                   type="button"
                   onClick={openShareModalWithCurrentFilters}
@@ -2233,13 +2332,14 @@ export default function App() {
               <>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-5">
                   {paginatedModels.map((model) => {
-                    const imgUrl = signedUrls[model.id] || signedUrlsCacheRef.current[model.id];
+                    const paths = getModelImagePaths(model);
+                    const coverUrl = getSignedUrlForPath(paths[0]);
                     return (
                       <div key={model.id} onClick={() => handleOpenDetails(model)} className="group bg-[#0a0a0a] border border-[#262522] hover:border-[#e4e0d7]/60 rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg">
                         <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
-                          {imgUrl ? (
+                          {coverUrl ? (
                             <img
-                              src={imgUrl}
+                              src={coverUrl}
                               alt={model.name}
                               loading="lazy"
                               className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
@@ -2253,6 +2353,11 @@ export default function App() {
                           <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[#000000]/85 backdrop-blur text-[#e4e0d7] border border-[#e4e0d7]/30">
                             {model.category}
                           </span>
+                          {paths.length > 1 && (
+                            <span className="absolute bottom-2 right-2 px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#000000]/85 text-[#c89d66] border border-[#c89d66]/40 flex items-center gap-1">
+                              <Images className="w-3 h-3" /> {paths.length} fotos
+                            </span>
+                          )}
                         </div>
                         <div className="p-4 flex-1 flex flex-col justify-between space-y-3">
                           <div>
@@ -2403,9 +2508,39 @@ export default function App() {
                   {uploadForm.zipFile && <p className="text-[11px] text-[#70a37f] truncate">{uploadForm.zipFile.name}</p>}
                 </div>
                 <div className="p-4 rounded-xl bg-[#000000] border border-dashed border-[#383632] space-y-2">
-                  <label className="block text-xs font-semibold text-[#c89d66]">2. Imagem de Referência</label>
-                  <input type="file" accept="image/*" onChange={(e) => setUploadForm({ ...uploadForm, imageFile: e.target.files?.[0] || null })} className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]" />
-                  {uploadForm.imageFile && <p className="text-[11px] text-[#70a37f] truncate">{uploadForm.imageFile.name}</p>}
+                  <label className="block text-xs font-semibold text-[#c89d66]">2. Imagens de Referência (Pode selecionar várias)</label>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={(e) => {
+                      const files = Array.from(e.target.files || []);
+                      setUploadForm((prev) => ({ ...prev, imageFiles: [...prev.imageFiles, ...files] }));
+                    }}
+                    className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]"
+                  />
+                  {uploadForm.imageFiles.length > 0 && (
+                    <div className="space-y-1 pt-1">
+                      <p className="text-[11px] text-[#70a37f] font-semibold">{uploadForm.imageFiles.length} imagem(ns) selecionada(s):</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {uploadForm.imageFiles.map((img, i) => (
+                          <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#141413] border border-[#262522] text-[10px] text-[#e4e0d7]">
+                            <span className="truncate max-w-[110px]">{img.name}</span>
+                            <button
+                              type="button"
+                              onClick={() => setUploadForm((prev) => ({
+                                ...prev,
+                                imageFiles: prev.imageFiles.filter((_, idx) => idx !== i)
+                              }))}
+                              className="text-[#d96b68] hover:text-white cursor-pointer"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
               {uploading && <div className="p-3 rounded-xl bg-[#141413] border border-[#e4e0d7]/30 flex items-center gap-3 text-xs text-[#e4e0d7]"><RefreshCw className="w-4 h-4 animate-spin shrink-0" /><span>{uploadStep || 'Processando...'}</span></div>}
@@ -2527,7 +2662,7 @@ export default function App() {
                                   category: 'Geral',
                                   tags: '',
                                   notes: '',
-                                  imageFile: null
+                                  imageFiles: []
                                 });
                               }}
                               className="px-3.5 py-1.5 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-lg text-xs font-bold cursor-pointer transition"
@@ -2781,7 +2916,7 @@ export default function App() {
         )}
       </main>
 
-      {/* MODAL PARA CRIAR E GERENCIAR LINKS COMPARTILHADOS COM FILTRO TRAVADO */}
+      {/* MODAL PARA CRIAR E GERENCIAR LINKS COMPARTILHADOS */}
       {shareModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 overflow-y-auto">
           <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-xl w-full p-6 space-y-5 my-auto max-h-[90vh] overflow-y-auto">
@@ -2792,7 +2927,7 @@ export default function App() {
                   <span>Compartilhar Catálogo (Somente Visualização)</span>
                 </h3>
                 <p className="text-xs text-[#8c877e] mt-1">
-                  A pessoa que receber o link verá <strong>apenas</strong> os modelos que corresponderem ao filtro abaixo, sem precisar logar e sem acesso aos seus arquivos ZIP do Drive.
+                  A pessoa que receber o link verá <strong>apenas</strong> os modelos e fotos que corresponderem ao filtro abaixo, sem precisar logar.
                 </p>
               </div>
               <button onClick={() => setShareModalOpen(false)} className="text-[#8c877e] hover:text-white cursor-pointer">
@@ -2802,7 +2937,7 @@ export default function App() {
 
             <form onSubmit={handleCreateSharedLink} className="space-y-4 p-4 rounded-xl bg-[#000000] border border-[#262522]">
               <div>
-                <label className="block text-xs font-medium text-[#a39e93] mb-1">Título da Vitrine (aparece no topo para o visitante)</label>
+                <label className="block text-xs font-medium text-[#a39e93] mb-1">Título da Vitrine</label>
                 <input
                   type="text"
                   required
@@ -2863,7 +2998,6 @@ export default function App() {
               </div>
             </form>
 
-            {/* Lista de Links Ativos */}
             <div className="space-y-2.5">
               <h4 className="text-xs font-semibold text-[#a39e93] uppercase tracking-wider">
                 Links Compartilhados Criados ({sharedLinks.length})
@@ -2977,31 +3111,12 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL DETALHES */}
+      {/* MODAL DETALHES DO PROPRIETÁRIO (COM CARROSSEL DE MÚLTIPLAS IMAGENS) */}
       {selectedModel && (
         <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
           <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
-            <div className="aspect-video bg-[#000000] relative flex items-center justify-center border-b border-[#1c1b19]">
-              {(signedUrls[selectedModel.id] || signedUrlsCacheRef.current[selectedModel.id]) ? (
-                <>
-                  <img
-                    src={signedUrls[selectedModel.id] || signedUrlsCacheRef.current[selectedModel.id]}
-                    alt={selectedModel.name}
-                    className="w-full h-full object-contain"
-                  />
-                  <button
-                    onClick={() => setLightboxUrl(signedUrls[selectedModel.id] || signedUrlsCacheRef.current[selectedModel.id])}
-                    className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-[#000000]/85 text-[#e4e0d7] text-xs flex items-center gap-1.5 border border-[#e4e0d7]/30 cursor-pointer"
-                  >
-                    <Eye className="w-4 h-4" /> Ampliar
-                  </button>
-                </>
-              ) : (
-                <div className="text-[#5e5a52] text-xs">Sem imagem</div>
-              )}
-              <button onClick={() => setSelectedModel(null)} className="absolute top-3 right-3 p-2 rounded-full bg-[#000000]/80 text-[#a39e93] cursor-pointer"><X className="w-5 h-5" /></button>
-            </div>
-            <div className="p-4 sm:p-6 space-y-4 max-h-[60vh] overflow-y-auto">
+            {renderImageCarouselModalHeader(selectedModel)}
+            <div className="p-4 sm:p-6 space-y-4 max-h-[55vh] overflow-y-auto">
               <div className="flex justify-between items-start">
                 <div><span className="px-2.5 py-1 rounded-md text-xs bg-[#e4e0d7]/15 text-[#e4e0d7]">{selectedModel.category}</span><h2 className="text-lg font-bold text-[#e4e0d7] mt-2">{selectedModel.name}</h2></div>
                 <span className="text-xs text-[#8c877e]">{formatBytes(selectedModel.drive_file_size)}</span>
@@ -3015,7 +3130,21 @@ export default function App() {
               <div className="flex justify-between pt-2 border-t border-[#1c1b19]">
                 <a href={selectedModel.drive_file_url} target="_blank" rel="noreferrer" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold inline-flex items-center gap-2"><ExternalLink className="w-4 h-4" /> Abrir ZIP no Drive</a>
                 <div className="flex gap-2">
-                  <button onClick={() => setEditingModel({ ...selectedModel, tagsInput: (selectedModel.tags || []).join(', ') })} className="px-3.5 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs cursor-pointer">Editar</button>
+                  <button
+                    onClick={() => {
+                      const existingPaths = getModelImagePaths(selectedModel);
+                      setEditingModel({
+                        ...selectedModel,
+                        originalModel: selectedModel,
+                        tagsInput: (selectedModel.tags || []).join(', '),
+                        keptImagePaths: existingPaths,
+                        newImageFiles: []
+                      });
+                    }}
+                    className="px-3.5 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs cursor-pointer"
+                  >
+                    Editar / Galeria
+                  </button>
                   <button onClick={() => { setDeleteConfirmModel(selectedModel); setDeleteAlsoFromDrive(false); }} className="px-3.5 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs cursor-pointer">Excluir</button>
                 </div>
               </div>
@@ -3030,19 +3159,95 @@ export default function App() {
         </div>
       )}
 
+      {/* MODAL DE EDIÇÃO COM GESTÃO DE GALERIA DE MÚLTIPLAS IMAGENS */}
       {editingModel && (
         <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 overflow-y-auto">
-          <form onSubmit={handleSaveEdit} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4 my-auto">
-            <div className="flex justify-between items-center"><h3 className="font-bold text-[#e4e0d7]">Editar Cadastro</h3><button type="button" onClick={() => setEditingModel(null)}><X className="w-5 h-5 text-[#8c877e]" /></button></div>
+          <form onSubmit={handleSaveEdit} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4 my-auto max-h-[92vh] overflow-y-auto">
+            <div className="flex justify-between items-center"><h3 className="font-bold text-[#e4e0d7]">Editar Cadastro e Galeria</h3><button type="button" onClick={() => setEditingModel(null)}><X className="w-5 h-5 text-[#8c877e]" /></button></div>
             <div><label className="block text-xs text-[#a39e93] mb-1">Nome</label><input type="text" required value={editingModel.name} onChange={(e) => setEditingModel({ ...editingModel, name: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
             {renderCategorySelector(editingModel.category, (val) => setEditingModel({ ...editingModel, category: val }), 'edit')}
             <div><label className="block text-xs text-[#a39e93] mb-1">Descrição</label><textarea rows={2} value={editingModel.description} onChange={(e) => setEditingModel({ ...editingModel, description: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
             <div><label className="block text-xs text-[#a39e93] mb-1">Tags (separadas por vírgula)</label><input type="text" value={editingModel.tagsInput} onChange={(e) => setEditingModel({ ...editingModel, tagsInput: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
             <div><label className="block text-xs text-[#a39e93] mb-1">Observações de Impressão</label><input type="text" value={editingModel.notes || ''} onChange={(e) => setEditingModel({ ...editingModel, notes: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
-            <div>
-              <label className="block text-xs font-semibold text-[#c89d66] mb-1">Alterar Imagem</label>
-              <input type="file" accept="image/*" onChange={(e) => setEditingModel({ ...editingModel, newImageFile: e.target.files?.[0] || null })} className="w-full text-xs text-[#a39e93]" />
+
+            {/* Galeria de Imagens Atuais (com opção de remover individualmente ou definir capa) */}
+            {editingModel.keptImagePaths?.length > 0 && (
+              <div className="space-y-2">
+                <label className="block text-xs font-semibold text-[#e4e0d7]">
+                  Imagens Atuais ({editingModel.keptImagePaths.length}) — A primeira é a capa:
+                </label>
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                  {editingModel.keptImagePaths.map((p, idx) => {
+                    const url = getSignedUrlForPath(p);
+                    return (
+                      <div key={p} className="relative group aspect-video rounded-lg overflow-hidden border border-[#262522] bg-[#000000]">
+                        {url && <img src={url} alt={`Foto ${idx + 1}`} className="w-full h-full object-cover" />}
+                        {idx === 0 && (
+                          <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-[#000000]/80 text-[9px] font-bold text-[#c89d66]">
+                            Capa
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setEditingModel((prev) => ({
+                            ...prev,
+                            keptImagePaths: prev.keptImagePaths.filter((item) => item !== p)
+                          }))}
+                          className="absolute top-1 right-1 p-1 rounded-full bg-[#b94a48] text-white cursor-pointer"
+                          title="Remover esta imagem"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="p-3.5 rounded-xl bg-[#000000] border border-dashed border-[#383632] space-y-2">
+              <label className="block text-xs font-semibold text-[#c89d66]">Adicionar Novas Imagens à Galeria</label>
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={(e) => {
+                  const files = Array.from(e.target.files || []);
+                  setEditingModel((prev) => ({
+                    ...prev,
+                    newImageFiles: [...(prev.newImageFiles || []), ...files]
+                  }));
+                }}
+                className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]"
+              />
+              {editingModel.newImageFiles?.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {editingModel.newImageFiles.map((f, i) => (
+                    <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#141413] border border-[#262522] text-[10px] text-[#70a37f]">
+                      <span className="truncate max-w-[120px]">+{f.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => setEditingModel((prev) => ({
+                          ...prev,
+                          newImageFiles: prev.newImageFiles.filter((_, idx) => idx !== i)
+                        }))}
+                        className="text-[#d96b68] cursor-pointer"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
+
+            {uploading && (
+              <div className="p-2.5 rounded-xl bg-[#141413] text-xs text-[#e4e0d7] flex items-center gap-2">
+                <RefreshCw className="w-4 h-4 animate-spin" />
+                <span>{uploadStep || 'Salvando alterações...'}</span>
+              </div>
+            )}
+
             <div className="flex justify-end gap-2 pt-2">
               <button type="button" onClick={() => setEditingModel(null)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
               <button type="submit" disabled={uploading} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">Salvar</button>
@@ -3067,7 +3272,7 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL DE IMPORTAÇÃO COMPLETO */}
+      {/* MODAL DE IMPORTAÇÃO COMPLETO (COM SUPORTE A MÚLTIPLAS IMAGENS) */}
       {importingFile && (
         <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 overflow-y-auto">
           <form onSubmit={handleConfirmImport} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-xl w-full p-6 space-y-4 my-auto max-h-[92vh] overflow-y-auto">
@@ -3138,14 +3343,36 @@ export default function App() {
             </div>
 
             <div className="p-4 rounded-xl bg-[#000000] border border-dashed border-[#383632] space-y-2">
-              <label className="block text-xs font-semibold text-[#c89d66]">Imagem de Referência (Supabase Privado)</label>
+              <label className="block text-xs font-semibold text-[#c89d66]">Imagens de Referência (Pode selecionar várias fotos)</label>
               <input
                 type="file"
                 accept="image/*"
-                onChange={(e) => setImportForm({ ...importForm, imageFile: e.target.files?.[0] || null })}
+                multiple
+                onChange={(e) => {
+                  const files = Array.from(e.target.files || []);
+                  setImportForm((prev) => ({ ...prev, imageFiles: [...prev.imageFiles, ...files] }));
+                }}
                 className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]"
               />
-              {importForm.imageFile && <p className="text-[11px] text-[#70a37f] truncate">Selecionada: {importForm.imageFile.name}</p>}
+              {importForm.imageFiles.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {importForm.imageFiles.map((img, i) => (
+                    <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#141413] border border-[#262522] text-[10px] text-[#70a37f]">
+                      <span className="truncate max-w-[130px]">{img.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => setImportForm((prev) => ({
+                          ...prev,
+                          imageFiles: prev.imageFiles.filter((_, idx) => idx !== i)
+                        }))}
+                        className="text-[#d96b68] cursor-pointer"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
 
             {uploading && (
