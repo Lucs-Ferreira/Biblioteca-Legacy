@@ -401,7 +401,7 @@ export default function App() {
     script.async = true;
     script.defer = true;
     document.body.appendChild(script);
-    loadJSZip().catch(() => {});
+    loadJSZip().catch(() => { });
   }, [shareIdFromUrl]);
 
   useEffect(() => {
@@ -459,8 +459,8 @@ export default function App() {
 
         const validSavedRefreshToken =
           cfg.google_refresh_token &&
-          cfg.google_refresh_token !== 'connected' &&
-          cfg.google_refresh_token !== 'active_session_token'
+            cfg.google_refresh_token !== 'connected' &&
+            cfg.google_refresh_token !== 'active_session_token'
             ? cfg.google_refresh_token
             : '';
 
@@ -685,6 +685,58 @@ export default function App() {
     return ids;
   };
 
+  // Filtro e Ordenação principal do Catálogo e da Vitrine Compartilhada
+  const activeModelsSource = useMemo(() => {
+    let baseList = [];
+
+    if (shareIdFromUrl) {
+      const list = sharedCatalogData?.models || [];
+      const q = visitorSearch.trim().toLowerCase();
+      baseList = !q
+        ? [...list]
+        : list.filter(
+            (m) =>
+              m.name?.toLowerCase().includes(q) ||
+              m.description?.toLowerCase().includes(q) ||
+              m.tags?.some((t) => t.toLowerCase().includes(q))
+          );
+    } else {
+      baseList = models.filter((m) => {
+        if (onlyGhostFilter && driveStatusCheck[m.id] !== 'missing') return false;
+        const matchesCat = selectedCategory === 'Todas' || m.category === selectedCategory;
+        if (!matchesCat) return false;
+        if (!debouncedQuery) return true;
+        return (
+          m.name?.toLowerCase().includes(debouncedQuery) ||
+          m.description?.toLowerCase().includes(debouncedQuery) ||
+          m.category?.toLowerCase().includes(debouncedQuery) ||
+          m.tags?.some((t) => t.toLowerCase().includes(debouncedQuery))
+        );
+      });
+    }
+
+    baseList.sort((a, b) => {
+      if (sortBy === 'oldest') return new Date(a.created_at || 0) - new Date(b.created_at || 0);
+      if (sortBy === 'name_asc') return (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' });
+      if (sortBy === 'name_desc') return (b.name || '').localeCompare(a.name || '', 'pt-BR', { sensitivity: 'base' });
+      if (sortBy === 'size_desc') return Number(b.drive_file_size || 0) - Number(a.drive_file_size || 0);
+      if (sortBy === 'size_asc') return Number(a.drive_file_size || 0) - Number(b.drive_file_size || 0);
+      return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+    });
+
+    return baseList;
+  }, [
+    shareIdFromUrl,
+    sharedCatalogData,
+    visitorSearch,
+    models,
+    selectedCategory,
+    debouncedQuery,
+    sortBy,
+    onlyGhostFilter,
+    driveStatusCheck
+  ]);
+  
   const fetchRootSubfolders = async (rootIdOverride) => {
     const rootId = rootIdOverride || settings.root_folder_id;
     if (!rootId) return [];
@@ -850,7 +902,7 @@ export default function App() {
             await googleDriveFetch(
               `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}?addParents=${targetFolderId}&removeParents=${m.drive_folder_id}&fields=id,parents`,
               { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
-            ).catch(() => {});
+            ).catch(() => { });
           }
         }
       }
@@ -908,7 +960,7 @@ export default function App() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ trashed: true })
               }
-            ).catch(() => {});
+            ).catch(() => { });
           }
         }
       }
@@ -1050,7 +1102,7 @@ export default function App() {
 
       setSharedLinks((prev) => [created, ...prev]);
       const shareUrl = `${window.location.origin}/?share=${created.id}`;
-      await navigator.clipboard.writeText(shareUrl).catch(() => {});
+      await navigator.clipboard.writeText(shareUrl).catch(() => { });
       showToast('Link da vitrine criado e copiado para a área de transferência!');
     } catch (err) {
       showToast(`Erro ao criar link: ${err.message}`, 'error');
@@ -1685,7 +1737,7 @@ export default function App() {
           if (!tokenRes.ok || !tokenData.access_token) {
             throw new Error(
               tokenData.error ||
-                'Falha ao obter token definitivo. Verifique se GOOGLE_CLIENT_SECRET está configurado na Vercel.'
+              'Falha ao obter token definitivo. Verifique se GOOGLE_CLIENT_SECRET está configurado na Vercel.'
             );
           }
 
@@ -2041,11 +2093,10 @@ export default function App() {
                       setBulkMode(!bulkMode);
                       setSelectedModelIds([]);
                     }}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${
-                      bulkMode
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${bulkMode
                         ? 'bg-[#e4e0d7] text-[#000000] border-[#e4e0d7]'
                         : 'bg-[#000000] text-[#a39e93] hover:text-[#e4e0d7] border-[#262522]'
-                    }`}
+                      }`}
                   >
                     <CheckSquare className="w-3.5 h-3.5" />
                     <span>{bulkMode ? 'Sair do Modo Lote' : 'Seleção em Lote'}</span>
@@ -2075,11 +2126,10 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => setOnlyGhostFilter(!onlyGhostFilter)}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer transition ${
-                        onlyGhostFilter
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer transition ${onlyGhostFilter
                           ? 'bg-[#b94a48] text-white border-[#b94a48]'
                           : 'bg-[#b94a48]/15 text-[#e89b99] border-[#b94a48]/40'
-                      }`}
+                        }`}
                     >
                       <AlertTriangle className="w-3.5 h-3.5" />
                       <span>{onlyGhostFilter ? 'Mostrando Apenas Ausentes' : `${ghostCount} Ausente(s) no Drive`}</span>
@@ -2202,13 +2252,12 @@ export default function App() {
                             handleOpenDetails(model);
                           }
                         }}
-                        className={`group bg-[#0a0a0a] border rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg ${
-                          isSelectedBulk
+                        className={`group bg-[#0a0a0a] border rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg ${isSelectedBulk
                             ? 'border-[#c89d66] ring-2 ring-[#c89d66]/40'
                             : isGhost
                               ? 'border-[#b94a48]'
                               : 'border-[#262522] hover:border-[#e4e0d7]/60'
-                        }`}
+                          }`}
                       >
                         <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
                           {coverUrl ? (
@@ -2246,11 +2295,10 @@ export default function App() {
                           <button
                             type="button"
                             onClick={(e) => handleTogglePrintQueue(model, e)}
-                            className={`absolute top-2.5 right-2.5 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition cursor-pointer ${
-                              model.in_print_queue
+                            className={`absolute top-2.5 right-2.5 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition cursor-pointer ${model.in_print_queue
                                 ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
                                 : 'bg-[#000000]/80 text-[#a39e93] hover:text-white border-[#262522]'
-                            }`}
+                              }`}
                           >
                             <ListOrdered className="w-3 h-3" />
                             <span>{model.in_print_queue ? 'Na Fila' : '+ Fila'}</span>
@@ -2333,11 +2381,10 @@ export default function App() {
                         key={num}
                         type="button"
                         onClick={() => setCurrentPage(num)}
-                        className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
-                          num === safeCurrentPage
+                        className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${num === safeCurrentPage
                             ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
                             : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7]'
-                        }`}
+                          }`}
                       >
                         {num}
                       </button>
@@ -2450,13 +2497,12 @@ export default function App() {
                           <select
                             value={prio}
                             onChange={(e) => handleChangeQueuePriority(model, e.target.value)}
-                            className={`px-2.5 py-1.5 rounded-xl text-xs font-bold border cursor-pointer ${
-                              prio === 'Alta'
+                            className={`px-2.5 py-1.5 rounded-xl text-xs font-bold border cursor-pointer ${prio === 'Alta'
                                 ? 'bg-[#b94a48]/20 text-[#e89b99] border-[#b94a48]/40'
                                 : prio === 'Baixa'
                                   ? 'bg-[#141413] text-[#8c877e] border-[#262522]'
                                   : 'bg-[#c89d66]/20 text-[#c89d66] border-[#c89d66]/40'
-                            }`}
+                              }`}
                           >
                             <option value="Alta" className="bg-[#0a0a0a] text-[#e4e0d7]">Alta</option>
                             <option value="Normal" className="bg-[#0a0a0a] text-[#e4e0d7]">Normal</option>
@@ -3266,9 +3312,8 @@ export default function App() {
                         key={p}
                         type="button"
                         onClick={() => setActiveImageIndex(idx)}
-                        className={`w-16 h-12 rounded-lg overflow-hidden border-2 shrink-0 transition cursor-pointer ${
-                          isSelected ? 'border-[#c89d66] scale-105' : 'border-[#262522] opacity-60 hover:opacity-100'
-                        }`}
+                        className={`w-16 h-12 rounded-lg overflow-hidden border-2 shrink-0 transition cursor-pointer ${isSelected ? 'border-[#c89d66] scale-105' : 'border-[#262522] opacity-60 hover:opacity-100'
+                          }`}
                       >
                         {thumbUrl ? (
                           <img src={thumbUrl} alt={`Miniatura ${idx + 1}`} className="w-full h-full object-cover" />
@@ -3314,11 +3359,10 @@ export default function App() {
                   <button
                     type="button"
                     onClick={(e) => handleTogglePrintQueue(selectedModel, e)}
-                    className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer ${
-                      selectedModel.in_print_queue
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer ${selectedModel.in_print_queue
                         ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
                         : 'bg-[#141413] text-[#e4e0d7] border-[#262522]'
-                    }`}
+                      }`}
                   >
                     <ListOrdered className="w-4 h-4" />
                     <span>{selectedModel.in_print_queue ? 'Na Fila de Impressão' : '+ Fila de Impressão'}</span>
