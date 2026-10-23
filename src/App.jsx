@@ -7,7 +7,7 @@ import {
   LogOut, FolderPlus, Tag, Calculator, Menu, Filter, ArrowRight,
   ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Share2,
   Copy, Link2, Images, ListOrdered, CheckSquare, Square, ArrowUpDown,
-  FileWarning, Layers
+  FileWarning, Layers, FileCode, ClipboardList
 } from 'lucide-react';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
@@ -132,6 +132,13 @@ export default function App() {
     laborHours: 0.5,
     profitMarginPct: 100
   });
+  const [orders, setOrders] = useState([]);
+  const [orderForm, setOrderForm] = useState({
+    clientName: '',
+    pieceName: '',
+    deductStockNow: false
+  });
+  const [gcodeInfo, setGcodeInfo] = useState('');
 
   const [models, setModels] = useState([]);
   const [pathUrls, setPathUrls] = useState({});
@@ -211,7 +218,13 @@ export default function App() {
   });
 
   const [newMaterialModal, setNewMaterialModal] = useState(false);
-  const [matForm, setMatForm] = useState({ type: 'Filamento', name: '', color: 'Preto', price_per_unit: 80 });
+  const [matForm, setMatForm] = useState({
+    type: 'Filamento',
+    name: '',
+    color: 'Preto',
+    price_per_unit: 80,
+    stock_grams: 1000
+  });
 
   const [newPrinterModal, setNewPrinterModal] = useState(false);
   const [printForm, setPrintForm] = useState({ name: '', power_watts: 150, printer_value: 2000, lifespan_hours: 5000 });
@@ -409,7 +422,7 @@ export default function App() {
     script.async = true;
     script.defer = true;
     document.body.appendChild(script);
-    loadJSZip().catch(() => {});
+    loadJSZip().catch(() => { });
   }, [shareIdFromUrl]);
 
   useEffect(() => {
@@ -450,12 +463,13 @@ export default function App() {
     if (!supabase || !session?.user) return;
     if (!silent) setLoadingData(true);
     try {
-      const [cfgRes, modelsRes, matRes, printRes, linksRes] = await Promise.all([
+      const [cfgRes, modelsRes, matRes, printRes, linksRes, ordersRes] = await Promise.all([
         supabase.from('user_settings').select('*').eq('user_id', session.user.id).maybeSingle(),
         supabase.from('stl_models').select('*').order('created_at', { ascending: false }),
         supabase.from('stl_materials').select('*').order('name'),
         supabase.from('stl_printers').select('*').order('name'),
-        supabase.from('shared_catalog_links').select('*').order('created_at', { ascending: false })
+        supabase.from('shared_catalog_links').select('*').order('created_at', { ascending: false }),
+        supabase.from('stl_orders').select('*').order('created_at', { ascending: false })
       ]);
 
       const cfg = cfgRes.data;
@@ -467,8 +481,8 @@ export default function App() {
 
         const validSavedRefreshToken =
           cfg.google_refresh_token &&
-          cfg.google_refresh_token !== 'connected' &&
-          cfg.google_refresh_token !== 'active_session_token'
+            cfg.google_refresh_token !== 'connected' &&
+            cfg.google_refresh_token !== 'active_session_token'
             ? cfg.google_refresh_token
             : '';
 
@@ -517,6 +531,7 @@ export default function App() {
 
       setModels(modelsRes.data || []);
       setSharedLinks(linksRes.data || []);
+      setOrders(ordersRes.data || []);
 
       const matList = matRes.data || [];
       setMaterials(matList);
@@ -660,7 +675,7 @@ export default function App() {
             await googleDriveFetch(
               `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}?addParents=${targetFolderId}&removeParents=${m.drive_folder_id}&fields=id,parents`,
               { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
-            ).catch(() => {});
+            ).catch(() => { });
           }
         }
       }
@@ -718,7 +733,7 @@ export default function App() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ trashed: true })
               }
-            ).catch(() => {});
+            ).catch(() => { });
           }
         }
       }
@@ -864,7 +879,7 @@ export default function App() {
 
       setSharedLinks((prev) => [created, ...prev]);
       const shareUrl = `${window.location.origin}/?share=${created.id}`;
-      await navigator.clipboard.writeText(shareUrl).catch(() => {});
+      await navigator.clipboard.writeText(shareUrl).catch(() => { });
       showToast('Link da vitrine criado e copiado para a área de transferência!');
     } catch (err) {
       showToast(`Erro ao criar link: ${err.message}`, 'error');
@@ -900,11 +915,11 @@ export default function App() {
       baseList = !q
         ? [...list]
         : list.filter(
-            (m) =>
-              m.name?.toLowerCase().includes(q) ||
-              m.description?.toLowerCase().includes(q) ||
-              m.tags?.some((t) => t.toLowerCase().includes(q))
-          );
+          (m) =>
+            m.name?.toLowerCase().includes(q) ||
+            m.description?.toLowerCase().includes(q) ||
+            m.tags?.some((t) => t.toLowerCase().includes(q))
+        );
     } else {
       baseList = models.filter((m) => {
         if (onlyGhostFilter && driveStatusCheck[m.id] !== 'missing') return false;
@@ -1043,7 +1058,7 @@ export default function App() {
           if (!tokenRes.ok || !tokenData.access_token) {
             throw new Error(
               tokenData.error ||
-                'Falha ao obter token definitivo. Verifique se GOOGLE_CLIENT_SECRET está configurado na Vercel.'
+              'Falha ao obter token definitivo. Verifique se GOOGLE_CLIENT_SECRET está configurado na Vercel.'
             );
           }
 
@@ -1927,16 +1942,237 @@ export default function App() {
         type: matForm.type,
         name: matForm.name.trim(),
         color: matForm.color.trim(),
-        price_per_unit: Number(matForm.price_per_unit)
+        price_per_unit: Number(matForm.price_per_unit),
+        stock_grams: Number(matForm.stock_grams ?? 1000)
       });
       if (error) throw error;
-      showToast('Material cadastrado!');
+      showToast('Material cadastrado com estoque!');
       setNewMaterialModal(false);
-      setMatForm({ type: 'Filamento', name: '', color: 'Preto', price_per_unit: 80 });
+      setMatForm({ type: 'Filamento', name: '', color: 'Preto', price_per_unit: 80, stock_grams: 1000 });
       loadUserData(true);
     } catch (err) {
       showToast(`Erro: ${err.message}`, 'error');
     }
+  };
+
+  // 1. Controle de Estoque: Dar Baixa ou Repor (+1kg)
+  const handleAdjustMaterialStock = async (materialId, deltaGrams, customMessage = null) => {
+    if (!supabase) return;
+    const mat = materials.find((m) => m.id === materialId);
+    if (!mat) {
+      showToast('Selecione um material válido.', 'error');
+      return;
+    }
+
+    const currentStock = Number(mat.stock_grams ?? 1000);
+    const newStock = Math.max(0, Number((currentStock + deltaGrams).toFixed(1)));
+
+    const { error } = await supabase
+      .from('stl_materials')
+      .update({ stock_grams: newStock })
+      .eq('id', materialId);
+
+    if (error) {
+      showToast(`Erro ao atualizar estoque: ${error.message}`, 'error');
+      return;
+    }
+
+    setMaterials((prev) =>
+      prev.map((m) => (m.id === materialId ? { ...m, stock_grams: newStock } : m))
+    );
+
+    if (customMessage) {
+      showToast(customMessage, newStock < 200 ? 'error' : 'success');
+    } else if (newStock < 200) {
+      showToast(`Atenção: Estoque de "${mat.name} (${mat.color})" está acabando (${newStock}g restantes)!`, 'error');
+    } else {
+      showToast(`Estoque de "${mat.name}" atualizado para ${newStock}g!`);
+    }
+  };
+
+  // 2. Leitor Automático de arquivo .GCODE (Cura, BambuStudio, OrcaSlicer, PrusaSlicer)
+  const handleParseGcodeFile = async (file) => {
+    if (!file) return;
+    try {
+      // Lê os primeiros 120KB e os últimos 120KB do GCODE (onde ficam os comentários dos fatiadores)
+      const chunkSize = 120 * 1024;
+      const headBlob = file.slice(0, chunkSize);
+      const tailBlob = file.size > chunkSize ? file.slice(file.size - chunkSize) : new Blob([]);
+      const text = (await headBlob.text()) + '\n' + (await tailBlob.text());
+
+      let detectedWeightG = null;
+      let detectedHours = null;
+
+      // Extração de Peso (em gramas)
+      const weightPatterns = [
+        /; total filament used \[g\]\s*=\s*([\d.]+)/i,
+        /; filament used \[g\]\s*=\s*([\d.,\s]+)/i,
+        /;Filament weight\s*=\s*([\d.]+)/i,
+        /;weight\s*=\s*([\d.]+)/i
+      ];
+
+      for (const regex of weightPatterns) {
+        const match = text.match(regex);
+        if (match && match[1]) {
+          // Soma caso seja multicolor (ex: "12.4, 5.2")
+          const sum = match[1]
+            .split(',')
+            .map((v) => parseFloat(v.trim()))
+            .filter((n) => !isNaN(n))
+            .reduce((acc, cur) => acc + cur, 0);
+          if (sum > 0) {
+            detectedWeightG = Number(sum.toFixed(1));
+            break;
+          }
+        }
+      }
+
+      // Fallback do Cura por metros/volume se não tiver gramas explícito
+      if (!detectedWeightG) {
+        const metersMatch = text.match(/;Filament used:\s*([\d.]+)\s*m/i);
+        if (metersMatch && metersMatch[1]) {
+          const meters = parseFloat(metersMatch[1]);
+          detectedWeightG = Number((meters * 2.98).toFixed(1)); // ~2.98g por metro de PLA 1.75mm
+        }
+      }
+
+      // Extração de Tempo de Impressão
+      const timeSecMatch = text.match(/;TIME:\s*(\d+)/i);
+      if (timeSecMatch && timeSecMatch[1]) {
+        const secs = parseInt(timeSecMatch[1], 10);
+        if (secs > 0) detectedHours = Number((secs / 3600).toFixed(2));
+      } else {
+        const estMatch = text.match(/; estimated printing time .*?=\s*(.*)/i);
+        if (estMatch && estMatch[1]) {
+          const tStr = estMatch[1];
+          const d = parseInt(tStr.match(/(\d+)\s*d/i)?.[1] || '0', 10);
+          const h = parseInt(tStr.match(/(\d+)\s*h/i)?.[1] || '0', 10);
+          const m = parseInt(tStr.match(/(\d+)\s*m/i)?.[1] || '0', 10);
+          const s = parseInt(tStr.match(/(\d+)\s*s/i)?.[1] || '0', 10);
+          const totalH = d * 24 + h + m / 60 + s / 3600;
+          if (totalH > 0) detectedHours = Number(totalH.toFixed(2));
+        }
+      }
+
+      if (detectedWeightG || detectedHours) {
+        setCalcForm((prev) => ({
+          ...prev,
+          weightGrams: detectedWeightG ?? prev.weightGrams,
+          printHours: detectedHours ?? prev.printHours
+        }));
+        const cleanName = file.name.replace(/\.gcode$/i, '');
+        setOrderForm((prev) => ({ ...prev, pieceName: prev.pieceName || cleanName }));
+        setGcodeInfo(
+          `GCODE "${file.name}" lido: ${detectedWeightG ? `${detectedWeightG}g` : 'peso mantido'} • ${detectedHours ? `${detectedHours}h` : 'tempo mantido'}`
+        );
+        showToast('Dados do GCODE importados automaticamente para a calculadora!');
+      } else {
+        showToast('Não foi possível encontrar comentários de peso/tempo neste GCODE.', 'error');
+      }
+    } catch (err) {
+      showToast(`Erro ao ler GCODE: ${err.message}`, 'error');
+    }
+  };
+
+  // 3. Salvar e Gerenciar Histórico de Orçamentos / Pedidos
+  const handleSaveOrderFromCalculator = async (e) => {
+    e.preventDefault();
+    if (!supabase || !session?.user) return;
+    if (!orderForm.clientName.trim() || !orderForm.pieceName.trim()) {
+      showToast('Preencha o nome do cliente e o nome da peça para salvar o orçamento.', 'error');
+      return;
+    }
+
+    const selMat = materials.find((m) => m.id === calcForm.materialId);
+    const selPrint = printers.find((p) => p.id === calcForm.printerId);
+    const weightToDeduct = Number(calculationResults.effectiveWeightG.toFixed(1));
+
+    try {
+      const { data: created, error } = await supabase
+        .from('stl_orders')
+        .insert({
+          user_id: session.user.id,
+          client_name: orderForm.clientName.trim(),
+          piece_name: orderForm.pieceName.trim(),
+          material_id: selMat?.id || null,
+          material_label: selMat ? `${selMat.type}: ${selMat.name} (${selMat.color})` : 'Não informado',
+          printer_label: selPrint ? selPrint.name : 'Padrão',
+          weight_grams: weightToDeduct,
+          print_hours: Number(calcForm.printHours) || 0,
+          total_cost: Number(calculationResults.totalCost.toFixed(2)),
+          suggested_price: Number(calculationResults.suggestedPrice.toFixed(2)),
+          net_profit: Number(calculationResults.netProfit.toFixed(2)),
+          status: orderForm.deductStockNow ? 'Aprovado / Imprimindo' : 'Orçamento',
+          stock_deducted: Boolean(orderForm.deductStockNow && selMat)
+        })
+        .select('*')
+        .single();
+
+      if (error) throw error;
+
+      if (orderForm.deductStockNow && selMat) {
+        await handleAdjustMaterialStock(
+          selMat.id,
+          -weightToDeduct,
+          `Orçamento salvo e baixa de ${weightToDeduct}g aplicada no estoque!`
+        );
+      } else {
+        showToast('Orçamento salvo no Histórico de Pedidos!');
+      }
+
+      setOrders((prev) => [created, ...prev]);
+      setOrderForm({ clientName: '', pieceName: '', deductStockNow: false });
+    } catch (err) {
+      showToast(`Erro ao salvar pedido: ${err.message}`, 'error');
+    }
+  };
+
+  const handleUpdateOrderStatus = async (order, newStatus) => {
+    if (!supabase) return;
+    let shouldDeductNow = false;
+    if (
+      !order.stock_deducted &&
+      order.material_id &&
+      (newStatus === 'Aprovado / Imprimindo' || newStatus === 'Concluído / Pago')
+    ) {
+      shouldDeductNow = true;
+    }
+
+    const { error } = await supabase
+      .from('stl_orders')
+      .update({
+        status: newStatus,
+        stock_deducted: order.stock_deducted || shouldDeductNow
+      })
+      .eq('id', order.id);
+
+    if (error) {
+      showToast(`Erro: ${error.message}`, 'error');
+      return;
+    }
+
+    if (shouldDeductNow) {
+      await handleAdjustMaterialStock(
+        order.material_id,
+        -Number(order.weight_grams || 0),
+        `Status atualizado para "${newStatus}" e baixa de ${order.weight_grams}g realizada no estoque!`
+      );
+    } else {
+      showToast(`Status do pedido atualizado para "${newStatus}"!`);
+    }
+
+    setOrders((prev) =>
+      prev.map((o) =>
+        o.id === order.id ? { ...o, status: newStatus, stock_deducted: o.stock_deducted || shouldDeductNow } : o
+      )
+    );
+  };
+
+  const handleDeleteOrder = async (id) => {
+    if (!supabase) return;
+    await supabase.from('stl_orders').delete().eq('id', id);
+    setOrders((prev) => prev.filter((o) => o.id !== id));
+    showToast('Registro de pedido excluído.');
   };
 
   const handleDeleteMaterial = async (id) => {
@@ -2153,9 +2389,8 @@ export default function App() {
                   key={p}
                   type="button"
                   onClick={() => setActiveImageIndex(idx)}
-                  className={`w-16 h-12 rounded-lg overflow-hidden border-2 shrink-0 transition cursor-pointer ${
-                    isSelected ? 'border-[#c89d66] scale-105' : 'border-[#262522] opacity-60 hover:opacity-100'
-                  }`}
+                  className={`w-16 h-12 rounded-lg overflow-hidden border-2 shrink-0 transition cursor-pointer ${isSelected ? 'border-[#c89d66] scale-105' : 'border-[#262522] opacity-60 hover:opacity-100'
+                    }`}
                 >
                   {thumbUrl ? (
                     <img src={thumbUrl} alt={`Miniatura ${idx + 1}`} className="w-full h-full object-cover" />
@@ -2375,11 +2610,10 @@ export default function App() {
                           key={num}
                           type="button"
                           onClick={() => setCurrentPage(num)}
-                          className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold cursor-pointer ${
-                            num === safeCurrentPage
-                              ? 'bg-[#e4e0d7] text-[#000000]'
-                              : 'bg-[#000000] border border-[#262522] text-[#a39e93]'
-                          }`}
+                          className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold cursor-pointer ${num === safeCurrentPage
+                            ? 'bg-[#e4e0d7] text-[#000000]'
+                            : 'bg-[#000000] border border-[#262522] text-[#a39e93]'
+                            }`}
                         >
                           {num}
                         </button>
@@ -2680,11 +2914,10 @@ export default function App() {
                       setBulkMode(!bulkMode);
                       setSelectedModelIds([]);
                     }}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${
-                      bulkMode
-                        ? 'bg-[#e4e0d7] text-[#000000] border-[#e4e0d7]'
-                        : 'bg-[#000000] text-[#a39e93] hover:text-[#e4e0d7] border-[#262522]'
-                    }`}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${bulkMode
+                      ? 'bg-[#e4e0d7] text-[#000000] border-[#e4e0d7]'
+                      : 'bg-[#000000] text-[#a39e93] hover:text-[#e4e0d7] border-[#262522]'
+                      }`}
                   >
                     <CheckSquare className="w-3.5 h-3.5" />
                     <span>{bulkMode ? 'Sair do Modo Lote' : 'Seleção em Lote'}</span>
@@ -2715,11 +2948,10 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => setOnlyGhostFilter(!onlyGhostFilter)}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer transition ${
-                        onlyGhostFilter
-                          ? 'bg-[#b94a48] text-white border-[#b94a48]'
-                          : 'bg-[#b94a48]/15 text-[#e89b99] border-[#b94a48]/40'
-                      }`}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer transition ${onlyGhostFilter
+                        ? 'bg-[#b94a48] text-white border-[#b94a48]'
+                        : 'bg-[#b94a48]/15 text-[#e89b99] border-[#b94a48]/40'
+                        }`}
                     >
                       <AlertTriangle className="w-3.5 h-3.5" />
                       <span>{onlyGhostFilter ? 'Mostrando Apenas Ausentes' : `${ghostCount} Ausente(s) no Drive`}</span>
@@ -2843,13 +3075,12 @@ export default function App() {
                             handleOpenDetails(model);
                           }
                         }}
-                        className={`group bg-[#0a0a0a] border rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg ${
-                          isSelectedBulk
-                            ? 'border-[#c89d66] ring-2 ring-[#c89d66]/40'
-                            : isGhost
-                              ? 'border-[#b94a48]'
-                              : 'border-[#262522] hover:border-[#e4e0d7]/60'
-                        }`}
+                        className={`group bg-[#0a0a0a] border rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg ${isSelectedBulk
+                          ? 'border-[#c89d66] ring-2 ring-[#c89d66]/40'
+                          : isGhost
+                            ? 'border-[#b94a48]'
+                            : 'border-[#262522] hover:border-[#e4e0d7]/60'
+                          }`}
                       >
                         <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
                           {coverUrl ? (
@@ -2890,11 +3121,10 @@ export default function App() {
                             type="button"
                             onClick={(e) => handleTogglePrintQueue(model, e)}
                             title={model.in_print_queue ? 'Na Fila de Impressão (clique para remover)' : 'Adicionar à Fila de Impressão'}
-                            className={`absolute top-2.5 right-2.5 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition cursor-pointer ${
-                              model.in_print_queue
-                                ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
-                                : 'bg-[#000000]/80 text-[#a39e93] hover:text-white border-[#262522]'
-                            }`}
+                            className={`absolute top-2.5 right-2.5 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition cursor-pointer ${model.in_print_queue
+                              ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
+                              : 'bg-[#000000]/80 text-[#a39e93] hover:text-white border-[#262522]'
+                              }`}
                           >
                             <ListOrdered className="w-3 h-3" />
                             <span>{model.in_print_queue ? 'Na Fila' : '+ Fila'}</span>
@@ -2983,11 +3213,10 @@ export default function App() {
                         key={num}
                         type="button"
                         onClick={() => setCurrentPage(num)}
-                        className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
-                          num === safeCurrentPage
-                            ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
-                            : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] hover:border-[#e4e0d7]/40'
-                        }`}
+                        className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${num === safeCurrentPage
+                          ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
+                          : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] hover:border-[#e4e0d7]/40'
+                          }`}
                       >
                         {num}
                       </button>
@@ -3104,13 +3333,12 @@ export default function App() {
                           <select
                             value={prio}
                             onChange={(e) => handleChangeQueuePriority(model, e.target.value)}
-                            className={`px-2.5 py-1.5 rounded-xl text-xs font-bold border cursor-pointer ${
-                              prio === 'Alta'
-                                ? 'bg-[#b94a48]/20 text-[#e89b99] border-[#b94a48]/40'
-                                : prio === 'Baixa'
-                                  ? 'bg-[#141413] text-[#8c877e] border-[#262522]'
-                                  : 'bg-[#c89d66]/20 text-[#c89d66] border-[#c89d66]/40'
-                            }`}
+                            className={`px-2.5 py-1.5 rounded-xl text-xs font-bold border cursor-pointer ${prio === 'Alta'
+                              ? 'bg-[#b94a48]/20 text-[#e89b99] border-[#b94a48]/40'
+                              : prio === 'Baixa'
+                                ? 'bg-[#141413] text-[#8c877e] border-[#262522]'
+                                : 'bg-[#c89d66]/20 text-[#c89d66] border-[#c89d66]/40'
+                              }`}
                           >
                             <option value="Alta" className="bg-[#0a0a0a] text-[#e4e0d7]">Alta</option>
                             <option value="Normal" className="bg-[#0a0a0a] text-[#e4e0d7]">Normal</option>
@@ -3361,6 +3589,64 @@ export default function App() {
         {/* CALCULADORA DE GASTOS */}
         {activeTab === 'calculadora' && (
           <div className="space-y-6 max-w-4xl mx-auto">
+            {/* LEITOR AUTOMÁTICO DE GCODE + BARRA DE ESTOQUE DO MATERIAL SELECIONADO */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-3 border-t border-[#1c1b19]">
+              <div className="p-3.5 rounded-xl bg-[#000000] border border-dashed border-[#c89d66]/50 flex flex-col justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-semibold text-[#c89d66]">
+                  <FileCode className="w-4 h-4 shrink-0" />
+                  <span>Importar Tempo e Peso de arquivo .GCODE</span>
+                </div>
+                <input
+                  type="file"
+                  accept=".gcode"
+                  onChange={(e) => handleParseGcodeFile(e.target.files?.[0])}
+                  className="w-full text-xs text-[#a39e93] file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:bg-[#c89d66] file:text-[#000000] file:font-bold cursor-pointer"
+                />
+                {gcodeInfo && <p className="text-[11px] text-[#70a37f] truncate">{gcodeInfo}</p>}
+              </div>
+
+              {(() => {
+                const selMat = materials.find((m) => m.id === calcForm.materialId);
+                const stockG = Number(selMat?.stock_grams ?? 1000);
+                const isLow = stockG < 200;
+                return (
+                  <div className="p-3.5 rounded-xl bg-[#000000] border border-[#262522] flex flex-col justify-between gap-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-[#a39e93]">Estoque do Material Selecionado:</span>
+                      <strong className={isLow ? 'text-[#d96b68]' : 'text-[#70a37f]'}>
+                        {selMat ? `${stockG}g disponíveis` : '—'}
+                      </strong>
+                    </div>
+                    {selMat && (
+                      <div className="flex items-center justify-between gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleAdjustMaterialStock(
+                              selMat.id,
+                              -Number(calculationResults.effectiveWeightG.toFixed(1)),
+                              `Baixa de ${calculationResults.effectiveWeightG.toFixed(1)}g realizada no estoque de ${selMat.name}!`
+                            )
+                          }
+                          className="flex-1 py-1.5 px-3 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-lg text-xs font-bold cursor-pointer transition"
+                        >
+                          Dar Baixa ({calculationResults.effectiveWeightG.toFixed(1)}g)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAdjustMaterialStock(selMat.id, 1000)}
+                          className="py-1.5 px-3 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-lg text-xs font-semibold cursor-pointer"
+                          title="Adicionar +1kg (1000g) ao estoque deste material"
+                        >
+                          +1kg
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-5 sm:p-6 space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div className="flex items-center gap-3">
@@ -3379,7 +3665,6 @@ export default function App() {
                   </button>
                 </div>
               </div>
-
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pt-4 border-t border-[#1c1b19]">
                 <div>
                   <label className="block text-xs font-medium text-[#a39e93] mb-1">Impressora</label>
@@ -3473,6 +3758,114 @@ export default function App() {
                   <span className="text-xs text-[#c89d66] font-semibold uppercase tracking-wider block">Preço Sugerido de Venda</span>
                   <span className="text-2xl sm:text-3xl font-black text-[#e4e0d7]">R$ {calculationResults.suggestedPrice.toFixed(2)}</span>
                 </div>
+              </div>
+            </div>
+
+            {/* SALVAR NO HISTÓRICO DE ORÇAMENTOS E PEDIDOS */}
+            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-6 space-y-5">
+              <div className="flex items-center gap-2.5 border-b border-[#1c1b19] pb-3">
+                <ClipboardList className="w-5 h-5 text-[#c89d66]" />
+                <h3 className="font-bold text-[#e4e0d7] text-base">Salvar Orçamento / Registrar Pedido</h3>
+              </div>
+
+              <form onSubmit={handleSaveOrderFromCalculator} className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+                <div>
+                  <label className="block text-xs text-[#a39e93] mb-1">Nome do Cliente / Projeto *</label>
+                  <input
+                    type="text"
+                    required
+                    value={orderForm.clientName}
+                    onChange={(e) => setOrderForm({ ...orderForm, clientName: e.target.value })}
+                    placeholder="Ex: João Silva"
+                    className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-[#a39e93] mb-1">Peça / Modelo *</label>
+                  <input
+                    type="text"
+                    required
+                    value={orderForm.pieceName}
+                    onChange={(e) => setOrderForm({ ...orderForm, pieceName: e.target.value })}
+                    placeholder="Ex: Dragão Articulado"
+                    className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="py-2 px-4 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] font-bold rounded-xl text-xs h-[38px] cursor-pointer transition"
+                >
+                  Salvar no Histórico (R$ {calculationResults.suggestedPrice.toFixed(2)})
+                </button>
+                <label className="sm:col-span-3 flex items-center gap-2 text-xs text-[#a39e93] cursor-pointer pt-1">
+                  <input
+                    type="checkbox"
+                    checked={orderForm.deductStockNow}
+                    onChange={(e) => setOrderForm({ ...orderForm, deductStockNow: e.target.checked })}
+                    className="w-4 h-4 accent-[#e4e0d7]"
+                  />
+                  <span>Já dar baixa imediata de {calculationResults.effectiveWeightG.toFixed(1)}g no estoque do material ao salvar</span>
+                </label>
+              </form>
+
+              {/* Tabela de Histórico de Orçamentos e Pedidos */}
+              <div className="space-y-2 pt-3 border-t border-[#1c1b19]">
+                <h4 className="text-xs font-semibold text-[#a39e93] uppercase tracking-wider">
+                  Histórico de Orçamentos e Pedidos ({orders.length})
+                </h4>
+                {orders.length === 0 ? (
+                  <p className="text-xs text-[#6e6a61] py-4 text-center">Nenhum orçamento ou pedido salvo ainda.</p>
+                ) : (
+                  <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                    {orders.map((ord) => (
+                      <div
+                        key={ord.id}
+                        className="p-3.5 rounded-xl bg-[#000000] border border-[#262522] flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <strong className="text-[#e4e0d7] text-sm">{ord.piece_name}</strong>
+                            <span className="text-[#c89d66]">Cliente: {ord.client_name}</span>
+                            {ord.stock_deducted && (
+                              <span className="px-2 py-0.5 rounded bg-[#4d7c5b]/20 text-[#70a37f] text-[10px]">
+                                Estoque abatido ({ord.weight_grams}g)
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[#8c877e]">
+                            {ord.material_label} • {ord.print_hours}h • Custo: R$ {Number(ord.total_cost).toFixed(2)} •{' '}
+                            <strong className="text-white">Venda: R$ {Number(ord.suggested_price).toFixed(2)}</strong> (Lucro: R$ {Number(ord.net_profit).toFixed(2)})
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+                          <select
+                            value={ord.status}
+                            onChange={(e) => handleUpdateOrderStatus(ord, e.target.value)}
+                            className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border cursor-pointer ${ord.status === 'Concluído / Pago'
+                                ? 'bg-[#4d7c5b]/20 text-[#70a37f] border-[#4d7c5b]/40'
+                                : ord.status === 'Aprovado / Imprimindo'
+                                  ? 'bg-[#c89d66]/20 text-[#c89d66] border-[#c89d66]/40'
+                                  : 'bg-[#141413] text-[#a39e93] border-[#262522]'
+                              }`}
+                          >
+                            <option value="Orçamento" className="bg-[#0a0a0a] text-[#e4e0d7]">Orçamento</option>
+                            <option value="Aprovado / Imprimindo" className="bg-[#0a0a0a] text-[#e4e0d7]">Aprovado / Imprimindo</option>
+                            <option value="Concluído / Pago" className="bg-[#0a0a0a] text-[#e4e0d7]">Concluído / Pago</option>
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteOrder(ord.id)}
+                            className="p-1.5 text-[#b94a48] hover:text-white cursor-pointer"
+                            title="Excluir pedido"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -3815,6 +4208,17 @@ export default function App() {
               <label className="block text-xs text-[#a39e93] mb-1">Preço por Kg / Litro (R$)</label>
               <input type="number" step="0.01" required value={matForm.price_per_unit} onChange={(e) => setMatForm({ ...matForm, price_per_unit: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
             </div>
+            <div>
+              <label className="block text-xs text-[#a39e93] mb-1">Estoque Inicial em Gramas / ml (1 carretel = 1000g)</label>
+              <input
+                type="number"
+                step="1"
+                required
+                value={matForm.stock_grams ?? 1000}
+                onChange={(e) => setMatForm({ ...matForm, stock_grams: e.target.value })}
+                className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
+              />
+            </div>
             <div className="flex justify-end gap-2 pt-2">
               <button type="button" onClick={() => setNewMaterialModal(false)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
               <button type="submit" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">Salvar Material</button>
@@ -3889,11 +4293,10 @@ export default function App() {
                   <button
                     type="button"
                     onClick={(e) => handleTogglePrintQueue(selectedModel, e)}
-                    className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer ${
-                      selectedModel.in_print_queue
-                        ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
-                        : 'bg-[#141413] text-[#e4e0d7] border-[#262522]'
-                    }`}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer ${selectedModel.in_print_queue
+                      ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
+                      : 'bg-[#141413] text-[#e4e0d7] border-[#262522]'
+                      }`}
                   >
                     <ListOrdered className="w-4 h-4" />
                     <span>{selectedModel.in_print_queue ? 'Na Fila de Impressão' : '+ Fila de Impressão'}</span>
