@@ -438,6 +438,24 @@ export default function App() {
     }
   }, [session?.user?.id, shareIdFromUrl]);
 
+  // Função para buscar os dados do usuário autenticado no Google (como o e-mail)
+  const fetchUserInfo = async (tokenToUse) => {
+    try {
+      const res = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+        headers: { Authorization: `Bearer ${tokenToUse}` }
+      });
+      if (res.ok) {
+        const info = await res.json();
+        if (info?.email) {
+          setGoogleUserEmail(info.email);
+          localStorage.setItem('stl_google_email', info.email);
+        }
+      }
+    } catch (err) {
+      console.warn('Não foi possível obter dados do usuário Google:', err);
+    }
+  };
+
   const loadUserData = async (silent = false) => {
     if (!supabase || !session?.user) return;
     if (!silent) setLoadingData(true);
