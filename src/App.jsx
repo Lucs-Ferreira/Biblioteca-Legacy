@@ -375,7 +375,7 @@ export default function App() {
     script.async = true;
     script.defer = true;
     document.body.appendChild(script);
-    loadJSZip().catch(() => { });
+    loadJSZip().catch(() => {});
   }, [shareIdFromUrl]);
 
   useEffect(() => {
@@ -433,8 +433,8 @@ export default function App() {
 
         const validSavedRefreshToken =
           cfg.google_refresh_token &&
-            cfg.google_refresh_token !== 'connected' &&
-            cfg.google_refresh_token !== 'active_session_token'
+          cfg.google_refresh_token !== 'connected' &&
+          cfg.google_refresh_token !== 'active_session_token'
             ? cfg.google_refresh_token
             : '';
 
@@ -602,6 +602,210 @@ export default function App() {
     }
   };
 
+  const ensureSpecificSubfolderInDrive = async (folderName, parentId) => {
+    if (!parentId || !folderName) return parentId;
+    const trimmed = folderName.trim();
+    const safeName = trimmed.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const q = encodeURIComponent(
+      `mimeType = 'application/vnd.google-apps.folder' and name = '${safeName}' and '${parentId}' in parents and trashed = false`
+    );
+
+    const searchRes = await googleDriveFetch(
+      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`
+    );
+    if (searchRes.ok) {
+      const searchData = await searchRes.json();
+      if (searchData.files?.length > 0) {
+        return searchData.files[0].id;
+      }
+    }
+
+    const createRes = await googleDriveFetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: trimmed,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [parentId]
+      })
+    });
+
+    if (!createRes.ok) {
+      const errBody = await createRes.json().catch(() => ({}));
+      throw new Error(errBody?.error?.message || `Não foi possível criar a pasta "${trimmed}".`);
+    }
+    const created = await createRes.json();
+    return created.id;
+  };
+
+  const ensureImportPipelineFolders = async (rootIdOverride) => {
+    const rootId = rootIdOverride || settings.root_folder_id;
+    if (!rootId) throw new Error('Pasta raiz não configurada.');
+
+    if (
+      importPipelineIds.importacoesId &&
+      importPipelineIds.aguardandoId &&
+      importPipelineIds.importadasId
+    ) {
+      return importPipelineIds;
+    }
+
+    const importacoesId = await ensureSpecificSubfolderInDrive('importações', rootId);
+    const aguardandoId = await ensureSpecificSubfolderInDrive('Aguardando', importacoesId);
+    const importadasId = await ensureSpecificSubfolderInDrive('Importadas', importacoesId);
+
+    const ids = { importacoesId, aguardandoId, importadasId };
+    setImportPipelineIds(ids);
+    return ids;
+  };
+
+  const fetchRootSubfolders = async (rootIdOverride) => {
+    const rootId = rootIdOverride || settings.root_folder_id;
+    if (!rootId) return [];
+    setLoadingSubfolders(true);
+    try {
+      const q = encodeURIComponent(
+        `'${rootId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
+      );
+      const res = await googleDriveFetch(
+        `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=100`
+      );
+      if (!res.ok) return [];
+      const data = await res.json();
+      const list = data.files || [];
+      setExistingSubfolders(list);
+      return list;
+    } catch {
+      return [];
+    } finally {
+      setLoadingSubfolders(false);
+    }
+  };
+
+  const ensureCategorySubfolderInDrive = async (categoryName, rootIdOverride, cachedSubfolders = null) => {
+    const rootId = rootIdOverride || settings.root_folder_id;
+    if (!rootId || !categoryName) return rootId;
+
+    const trimmedCategory = categoryName.trim();
+    const currentList = cachedSubfolders || existingSubfolders;
+    const foundCached = currentList.find(
+      (f) => f.name.trim().toLowerCase() === trimmedCategory.toLowerCase()
+    );
+    if (foundCached?.id) {
+      return foundCached.id;
+    }
+
+    const createdId = await ensureSpecificSubfolderInDrive(trimmedCategory, rootId);
+    setExistingSubfolders((prev) => {
+      if (prev.some((p) => p.id === createdId)) return prev;
+      return [...prev, { id: createdId, name: trimmedCategory }];
+    });
+    return createdId;
+  };
+
+  const handleSyncAllCategorySubfolders = async (rootIdOverride, silent = false) => {
+    const rootId = rootIdOverride || settings.root_folder_id;
+    if (!rootId) {
+      if (!silent) showToast('Selecione uma pasta raiz primeiro.', 'error');
+      return;
+    }
+
+    setSyncingCategoryFolders(true);
+    try {
+      const currentSubs = await fetchRootSubfolders(rootId);
+      let createdCount = 0;
+
+      for (const cat of allCategories) {
+        const exists = currentSubs.some(
+          (f) => f.name.trim().toLowerCase() === cat.trim().toLowerCase()
+        );
+        if (!exists) {
+          await ensureCategorySubfolderInDrive(cat, rootId, currentSubs);
+          createdCount++;
+        }
+      }
+
+      await ensureImportPipelineFolders(rootId);
+      await fetchRootSubfolders(rootId);
+
+      if (!silent || createdCount > 0) {
+        showToast(
+          createdCount > 0
+            ? `${createdCount} subpasta(s) e estrutura de importações criadas com sucesso!`
+            : `Todas as subpastas de categorias e a pasta importações/Aguardando estão prontas!`
+        );
+      }
+    } catch (err) {
+      if (!silent) showToast(`Erro ao montar subpastas: ${err.message}`, 'error');
+    } finally {
+      setSyncingCategoryFolders(false);
+    }
+  };
+
+  const getTargetUploadFolderId = async (categoryName) => {
+    if (!settings.organize_by_subfolders || !categoryName) {
+      return settings.root_folder_id;
+    }
+    const subId = await ensureCategorySubfolderInDrive(categoryName, settings.root_folder_id);
+    return subId || settings.root_folder_id;
+  };
+
+  const handleAddPermanentCategory = async (targetContext) => {
+    const trimmed = newCategoryName.trim();
+    if (!trimmed) return;
+
+    if (allCategories.some((c) => c.toLowerCase() === trimmed.toLowerCase())) {
+      showToast('Essa categoria já existe na lista!', 'error');
+      return;
+    }
+
+    setSavingCategory(true);
+    const updatedCustom = Array.from(new Set([...(settings.custom_categories || []), trimmed]));
+
+    if (session?.user) {
+      localStorage.setItem(`stl_cats_${session.user.id}`, JSON.stringify(updatedCustom));
+    }
+
+    setSettings((prev) => ({ ...prev, custom_categories: updatedCustom }));
+
+    if (supabase && session?.user) {
+      await supabase
+        .from('user_settings')
+        .upsert({
+          user_id: session.user.id,
+          root_folder_id: settings.root_folder_id,
+          root_folder_name: settings.root_folder_name,
+          organize_by_subfolders: settings.organize_by_subfolders,
+          max_upload_size_mb: settings.max_upload_size_mb,
+          custom_categories: updatedCustom,
+          updated_at: new Date().toISOString()
+        });
+    }
+
+    if (settings.organize_by_subfolders && settings.root_folder_id && googleConnected) {
+      try {
+        await ensureCategorySubfolderInDrive(trimmed);
+      } catch (err) {
+        console.warn('Erro ao criar subpasta automática:', err);
+      }
+    }
+
+    if (targetContext === 'upload') {
+      setUploadForm((prev) => ({ ...prev, category: trimmed }));
+    } else if (targetContext === 'import') {
+      setImportForm((prev) => ({ ...prev, category: trimmed }));
+    } else if (targetContext === 'edit' && editingModel) {
+      setEditingModel((prev) => ({ ...prev, category: trimmed }));
+    } else if (targetContext === 'bulk') {
+      setBulkTargetCategory(trimmed);
+    }
+
+    setNewCategoryName('');
+    setAddingCategoryContext(null);
+    setSavingCategory(false);
+    showToast(`Categoria "${trimmed}" salva!`);
+  };
+
   const handleConfirmBulkCategoryChange = async (e) => {
     e.preventDefault();
     if (!supabase || selectedModelIds.length === 0) return;
@@ -620,7 +824,7 @@ export default function App() {
             await googleDriveFetch(
               `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}?addParents=${targetFolderId}&removeParents=${m.drive_folder_id}&fields=id,parents`,
               { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
-            ).catch(() => { });
+            ).catch(() => {});
           }
         }
       }
@@ -678,7 +882,7 @@ export default function App() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ trashed: true })
               }
-            ).catch(() => { });
+            ).catch(() => {});
           }
         }
       }
@@ -777,180 +981,6 @@ export default function App() {
     }
   };
 
-  const activeModelsSource = useMemo(() => {
-    let baseList = [];
-
-    if (shareIdFromUrl) {
-      const list = sharedCatalogData?.models || [];
-      const q = visitorSearch.trim().toLowerCase();
-      baseList = !q
-        ? [...list]
-        : list.filter(
-          (m) =>
-            m.name?.toLowerCase().includes(q) ||
-            m.description?.toLowerCase().includes(q) ||
-            m.tags?.some((t) => t.toLowerCase().includes(q))
-        );
-    } else {
-      baseList = models.filter((m) => {
-        if (onlyGhostFilter && driveStatusCheck[m.id] !== 'missing') return false;
-        const matchesCat = selectedCategory === 'Todas' || m.category === selectedCategory;
-        if (!matchesCat) return false;
-        if (!debouncedQuery) return true;
-        return (
-          m.name?.toLowerCase().includes(debouncedQuery) ||
-          m.description?.toLowerCase().includes(debouncedQuery) ||
-          m.category?.toLowerCase().includes(debouncedQuery) ||
-          m.tags?.some((t) => t.toLowerCase().includes(debouncedQuery))
-        );
-      });
-    }
-
-    baseList.sort((a, b) => {
-      if (sortBy === 'oldest') return new Date(a.created_at || 0) - new Date(b.created_at || 0);
-      if (sortBy === 'name_asc') return (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' });
-      if (sortBy === 'name_desc') return (b.name || '').localeCompare(a.name || '', 'pt-BR', { sensitivity: 'base' });
-      if (sortBy === 'size_desc') return Number(b.drive_file_size || 0) - Number(a.drive_file_size || 0);
-      if (sortBy === 'size_asc') return Number(a.drive_file_size || 0) - Number(b.drive_file_size || 0);
-      return new Date(b.created_at || 0) - new Date(a.created_at || 0);
-    });
-
-    return baseList;
-  }, [
-    shareIdFromUrl,
-    sharedCatalogData,
-    visitorSearch,
-    models,
-    selectedCategory,
-    debouncedQuery,
-    sortBy,
-    onlyGhostFilter,
-    driveStatusCheck
-  ]);
-
-  const totalPages = useMemo(() => {
-    return Math.max(1, Math.ceil(activeModelsSource.length / itemsPerPage));
-  }, [activeModelsSource.length, itemsPerPage]);
-
-  const safeCurrentPage = Math.min(currentPage, totalPages);
-
-  const paginatedModels = useMemo(() => {
-    const startIndex = (safeCurrentPage - 1) * itemsPerPage;
-    return activeModelsSource.slice(startIndex, startIndex + itemsPerPage);
-  }, [activeModelsSource, safeCurrentPage, itemsPerPage]);
-
-  useEffect(() => {
-    if (paginatedModels.length > 0) {
-      ensureSignedUrlsForModels(paginatedModels);
-    }
-  }, [paginatedModels, ensureSignedUrlsForModels]);
-
-  useEffect(() => {
-    if (activeTab === 'fila' && queuedModels.length > 0) {
-      ensureSignedUrlsForModels(queuedModels);
-    }
-  }, [activeTab, queuedModels, ensureSignedUrlsForModels]);
-
-  const pageNumbers = useMemo(() => {
-    const pages = [];
-    const maxVisible = 5;
-    let start = Math.max(1, safeCurrentPage - Math.floor(maxVisible / 2));
-    let end = Math.min(totalPages, start + maxVisible - 1);
-    if (end - start + 1 < maxVisible) {
-      start = Math.max(1, end - maxVisible + 1);
-    }
-    for (let i = start; i <= end; i++) {
-      pages.push(i);
-    }
-    return pages;
-  }, [safeCurrentPage, totalPages]);
-
-  if (authLoading) {
-    return (
-      <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex items-center justify-center">
-        <RefreshCw className="w-8 h-8 animate-spin text-[#e4e0d7]" />
-      </div>
-    );
-  }
-
-  // Função para conectar a conta Google de forma definitiva via Refresh Token
-  const handleConnectGoogle = () => {
-    if (!GOOGLE_CLIENT_ID) {
-      showToast('VITE_GOOGLE_CLIENT_ID não configurado.', 'error');
-      return;
-    }
-    if (!window.google?.accounts?.oauth2) {
-      showToast('Aguarde o carregamento do serviço Google...', 'error');
-      return;
-    }
-
-    const codeClient = window.google.accounts.oauth2.initCodeClient({
-      client_id: GOOGLE_CLIENT_ID,
-      scope: GOOGLE_SCOPES,
-      ux_mode: 'popup',
-      access_type: 'offline',
-      prompt: 'consent',
-      callback: async (response) => {
-        if (response.error) {
-          showToast(`Erro na autorização Google: ${response.error}`, 'error');
-          return;
-        }
-
-        if (!response.code) return;
-
-        try {
-          const tokenRes = await fetch('/api/google-auth', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ code: response.code })
-          });
-
-          const tokenData = await tokenRes.json().catch(() => ({}));
-          if (!tokenRes.ok || !tokenData.access_token) {
-            throw new Error(
-              tokenData.error ||
-              'Falha ao obter token definitivo. Verifique se GOOGLE_CLIENT_SECRET está configurado na Vercel.'
-            );
-          }
-
-          const finalRefreshToken =
-            tokenData.refresh_token ||
-            refreshTokenRef.current ||
-            settings.google_refresh_token;
-
-          saveTokenData(tokenData.access_token, tokenData.expires_in || 3500, finalRefreshToken);
-
-          if (supabase && session?.user && finalRefreshToken) {
-            await supabase
-              .from('user_settings')
-              .upsert({
-                user_id: session.user.id,
-                google_refresh_token: finalRefreshToken,
-                root_folder_id: settings.root_folder_id,
-                root_folder_name: settings.root_folder_name,
-                organize_by_subfolders: settings.organize_by_subfolders,
-                max_upload_size_mb: settings.max_upload_size_mb,
-                custom_categories: settings.custom_categories,
-                updated_at: new Date().toISOString()
-              });
-            setSettings((prev) => ({ ...prev, google_refresh_token: finalRefreshToken }));
-          }
-
-          await fetchUserInfo(tokenData.access_token);
-          showToast('Conta Google vinculada definitivamente!');
-          if (!settings.root_folder_id) {
-            openFolderPicker();
-          }
-        } catch (err) {
-          showToast(err.message, 'error');
-        }
-      }
-    });
-
-    codeClient.requestCode();
-  };
-
-  // Função que abre o modal de compartilhamento com os filtros atuais da tela
   const openShareModalWithCurrentFilters = () => {
     const defaultTitle =
       selectedCategory !== 'Todas'
@@ -994,7 +1024,7 @@ export default function App() {
 
       setSharedLinks((prev) => [created, ...prev]);
       const shareUrl = `${window.location.origin}/?share=${created.id}`;
-      await navigator.clipboard.writeText(shareUrl).catch(() => { });
+      await navigator.clipboard.writeText(shareUrl).catch(() => {});
       showToast('Link da vitrine criado e copiado para a área de transferência!');
     } catch (err) {
       showToast(`Erro ao criar link: ${err.message}`, 'error');
@@ -1039,7 +1069,6 @@ export default function App() {
     }
   };
 
-  // Função que abre o modal de detalhes e verifica o status do arquivo no Drive
   const handleOpenDetails = (model) => {
     setSelectedModel(model);
     setActiveImageIndex(0);
@@ -1084,7 +1113,7 @@ export default function App() {
       return;
     }
     if (!uploadForm.zipFile) {
-      showToast('SeIecione um arquivo .ZIP para enviar.', 'error');
+      showToast('Selecione um arquivo .ZIP para enviar.', 'error');
       return;
     }
 
@@ -1186,6 +1215,127 @@ export default function App() {
     if (dbErr) throw new Error(`Falha ao salvar metadados: ${dbErr.message}`);
   };
 
+  const fetchAwaitingImports = async () => {
+    if (!settings.root_folder_id) return;
+    setLoadingDriveZips(true);
+    try {
+      const pipeline = await ensureImportPipelineFolders(settings.root_folder_id);
+      const q = encodeURIComponent(`'${pipeline.aguardandoId}' in parents and trashed = false`);
+      const res = await googleDriveFetch(
+        `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,size,createdTime,webViewLink,parents)&pageSize=100`
+      );
+      if (!res.ok) throw new Error('Erro ao listar itens da pasta importações/Aguardando.');
+      const data = await res.json();
+      setAwaitingItems(data.files || []);
+      awaitingLoadedRef.current = true;
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoadingDriveZips(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'importar' && googleConnected && settings.root_folder_id && !awaitingLoadedRef.current) {
+      fetchAwaitingImports();
+    }
+  }, [activeTab, googleConnected, settings.root_folder_id]);
+
+  const handleConnectGoogle = () => {
+    if (!GOOGLE_CLIENT_ID) {
+      showToast('VITE_GOOGLE_CLIENT_ID não configurado.', 'error');
+      return;
+    }
+    if (!window.google?.accounts?.oauth2) {
+      showToast('Aguarde o carregamento do serviço Google...', 'error');
+      return;
+    }
+
+    const codeClient = window.google.accounts.oauth2.initCodeClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: GOOGLE_SCOPES,
+      ux_mode: 'popup',
+      access_type: 'offline',
+      prompt: 'consent',
+      callback: async (response) => {
+        if (response.error) {
+          showToast(`Erro na autorização Google: ${response.error}`, 'error');
+          return;
+        }
+
+        if (!response.code) return;
+
+        try {
+          const tokenRes = await fetch('/api/google-auth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: response.code })
+          });
+
+          const tokenData = await tokenRes.json().catch(() => ({}));
+          if (!tokenRes.ok || !tokenData.access_token) {
+            throw new Error(
+              tokenData.error ||
+                'Falha ao obter token definitivo. Verifique se GOOGLE_CLIENT_SECRET está configurado na Vercel.'
+            );
+          }
+
+          const finalRefreshToken =
+            tokenData.refresh_token ||
+            refreshTokenRef.current ||
+            settings.google_refresh_token;
+
+          saveTokenData(tokenData.access_token, tokenData.expires_in || 3500, finalRefreshToken);
+
+          if (supabase && session?.user && finalRefreshToken) {
+            await supabase
+              .from('user_settings')
+              .upsert({
+                user_id: session.user.id,
+                google_refresh_token: finalRefreshToken,
+                root_folder_id: settings.root_folder_id,
+                root_folder_name: settings.root_folder_name,
+                organize_by_subfolders: settings.organize_by_subfolders,
+                max_upload_size_mb: settings.max_upload_size_mb,
+                custom_categories: settings.custom_categories,
+                updated_at: new Date().toISOString()
+              });
+            setSettings((prev) => ({ ...prev, google_refresh_token: finalRefreshToken }));
+          }
+
+          await fetchUserInfo(tokenData.access_token);
+          showToast('Conta Google vinculada definitivamente!');
+          if (!settings.root_folder_id) {
+            openFolderPicker();
+          }
+        } catch (err) {
+          showToast(err.message, 'error');
+        }
+      }
+    });
+
+    codeClient.requestCode();
+  };
+
+  const handleSupabaseAuth = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    if (!supabase) return;
+    try {
+      if (isSignUp) {
+        const { error } = await supabase.auth.signUp({ email, password });
+        if (error) throw error;
+        showToast('Conta criada! Verifique seu e-mail ou faça login.');
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        showToast('Bem-vindo à Biblioteca STL!');
+      }
+    } catch (err) {
+      setAuthError(err.message);
+    }
+  };
+
   const renderCategorySelector = (currentValue, onSelectChange, contextKey) => (
     <div>
       <div className="flex items-center justify-between mb-1">
@@ -1231,32 +1381,356 @@ export default function App() {
     </div>
   );
 
-  const fetchAwaitingImports = async () => {
-    if (!settings.root_folder_id) return;
-    setLoadingDriveZips(true);
-    try {
-      const pipeline = await ensureImportPipelineFolders(settings.root_folder_id);
-      const q = encodeURIComponent(`'${pipeline.aguardandoId}' in parents and trashed = false`);
-      const res = await googleDriveFetch(
-        `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,size,createdTime,webViewLink,parents)&pageSize=100`
-      );
-      if (!res.ok) throw new Error('Erro ao listar itens da pasta importações/Aguardando.');
-      const data = await res.json();
-      setAwaitingItems(data.files || []);
-      awaitingLoadedRef.current = true;
-    } catch (err) {
-      showToast(err.message, 'error');
-    } finally {
-      setLoadingDriveZips(false);
+  const activeModelsSource = useMemo(() => {
+    let baseList = [];
+
+    if (shareIdFromUrl) {
+      const list = sharedCatalogData?.models || [];
+      const q = visitorSearch.trim().toLowerCase();
+      baseList = !q
+        ? [...list]
+        : list.filter(
+            (m) =>
+              m.name?.toLowerCase().includes(q) ||
+              m.description?.toLowerCase().includes(q) ||
+              m.tags?.some((t) => t.toLowerCase().includes(q))
+          );
+    } else {
+      baseList = models.filter((m) => {
+        if (onlyGhostFilter && driveStatusCheck[m.id] !== 'missing') return false;
+        const matchesCat = selectedCategory === 'Todas' || m.category === selectedCategory;
+        if (!matchesCat) return false;
+        if (!debouncedQuery) return true;
+        return (
+          m.name?.toLowerCase().includes(debouncedQuery) ||
+          m.description?.toLowerCase().includes(debouncedQuery) ||
+          m.category?.toLowerCase().includes(debouncedQuery) ||
+          m.tags?.some((t) => t.toLowerCase().includes(debouncedQuery))
+        );
+      });
     }
-  };
+
+    baseList.sort((a, b) => {
+      if (sortBy === 'oldest') return new Date(a.created_at || 0) - new Date(b.created_at || 0);
+      if (sortBy === 'name_asc') return (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' });
+      if (sortBy === 'name_desc') return (b.name || '').localeCompare(a.name || '', 'pt-BR', { sensitivity: 'base' });
+      if (sortBy === 'size_desc') return Number(b.drive_file_size || 0) - Number(a.drive_file_size || 0);
+      if (sortBy === 'size_asc') return Number(a.drive_file_size || 0) - Number(b.drive_file_size || 0);
+      return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+    });
+
+    return baseList;
+  }, [
+    shareIdFromUrl,
+    sharedCatalogData,
+    visitorSearch,
+    models,
+    selectedCategory,
+    debouncedQuery,
+    sortBy,
+    onlyGhostFilter,
+    driveStatusCheck
+  ]);
+
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(activeModelsSource.length / itemsPerPage));
+  }, [activeModelsSource.length, itemsPerPage]);
+
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+
+  const paginatedModels = useMemo(() => {
+    const startIndex = (safeCurrentPage - 1) * itemsPerPage;
+    return activeModelsSource.slice(startIndex, startIndex + itemsPerPage);
+  }, [activeModelsSource, safeCurrentPage, itemsPerPage]);
 
   useEffect(() => {
-    if (activeTab === 'importar' && googleConnected && settings.root_folder_id && !awaitingLoadedRef.current) {
-      fetchAwaitingImports();
+    if (paginatedModels.length > 0) {
+      ensureSignedUrlsForModels(paginatedModels);
     }
-  }, [activeTab, googleConnected, settings.root_folder_id]);
-  
+  }, [paginatedModels, ensureSignedUrlsForModels]);
+
+  useEffect(() => {
+    if (activeTab === 'fila' && queuedModels.length > 0) {
+      ensureSignedUrlsForModels(queuedModels);
+    }
+  }, [activeTab, queuedModels, ensureSignedUrlsForModels]);
+
+  const pageNumbers = useMemo(() => {
+    const pages = [];
+    const maxVisible = 5;
+    let start = Math.max(1, safeCurrentPage - Math.floor(maxVisible / 2));
+    let end = Math.min(totalPages, start + maxVisible - 1);
+    if (end - start + 1 < maxVisible) {
+      start = Math.max(1, end - maxVisible + 1);
+    }
+    for (let i = start; i <= end; i++) {
+      pages.push(i);
+    }
+    return pages;
+  }, [safeCurrentPage, totalPages]);
+
+  if (shareIdFromUrl) {
+    return (
+      <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex flex-col">
+        <header className="border-b border-[#1f1e1c] bg-[#000000]/95 backdrop-blur sticky top-0 z-30">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              {renderLogo('w-9 h-9')}
+              <div>
+                <h1 className="font-bold text-base sm:text-lg text-[#e4e0d7] leading-tight">
+                  {sharedCatalogData?.title || 'Catálogo de Modelos 3D'}
+                </h1>
+                <p className="text-[11px] text-[#c89d66]">
+                  Modo Visualização &bull; Seleção exclusiva compartilhada
+                </p>
+              </div>
+            </div>
+
+            {sharedCatalogData && (
+              <div className="flex items-center gap-2">
+                {sharedCatalogData.category_filter && sharedCatalogData.category_filter !== 'Todas' && (
+                  <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#141413] text-[#e4e0d7] border border-[#262522]">
+                    Categoria: {sharedCatalogData.category_filter}
+                  </span>
+                )}
+                <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#e4e0d7] text-[#000000]">
+                  {activeModelsSource.length} modelo(s)
+                </span>
+              </div>
+            )}
+          </div>
+        </header>
+
+        <main className="max-w-7xl mx-auto w-full px-3 sm:px-6 py-6 sm:py-8 flex-1 space-y-6">
+          {sharedLoading ? (
+            <div className="py-24 text-center text-[#a39e93] flex flex-col items-center gap-3">
+              <RefreshCw className="w-8 h-8 animate-spin text-[#e4e0d7]" />
+              <span className="text-sm">Carregando catálogo compartilhado...</span>
+            </div>
+          ) : sharedError ? (
+            <div className="max-w-md mx-auto bg-[#0a0a0a] border border-[#b94a48]/40 rounded-2xl p-8 text-center space-y-3 my-12">
+              <AlertTriangle className="w-10 h-10 text-[#d96b68] mx-auto" />
+              <h2 className="text-base font-bold text-[#e4e0d7]">Catálogo Indisponível</h2>
+              <p className="text-xs text-[#8c877e]">{sharedError}</p>
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-col sm:flex-row gap-4 items-stretch sm:items-center justify-between bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4">
+                <div className="relative w-full sm:w-80 focus-within:sm:w-96 transition-all duration-300">
+                  <Search className="w-4 h-4 text-[#8c877e] absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={visitorSearch}
+                    onChange={(e) => setVisitorSearch(e.target.value)}
+                    placeholder="Pesquisar dentro desta seleção..."
+                    className="w-full pl-10 pr-9 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none focus:border-[#e4e0d7]"
+                  />
+                  {visitorSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setVisitorSearch('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-[#8c877e] hover:text-[#e4e0d7] cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 self-end sm:self-auto">
+                  <div className="flex items-center gap-1.5">
+                    <ArrowUpDown className="w-3.5 h-3.5 text-[#c89d66]" />
+                    <select
+                      value={sortBy}
+                      onChange={(e) => setSortBy(e.target.value)}
+                      className="px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-xs text-[#e4e0d7] cursor-pointer"
+                    >
+                      <option value="newest">Mais Recentes</option>
+                      <option value="oldest">Mais Antigos</option>
+                      <option value="name_asc">Nome (A–Z)</option>
+                      <option value="name_desc">Nome (Z–A)</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-[#8c877e]">Por página:</span>
+                    <select
+                      value={itemsPerPage}
+                      onChange={(e) => setItemsPerPage(Number(e.target.value))}
+                      className="px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-xs text-[#e4e0d7] cursor-pointer"
+                    >
+                      <option value={8}>8</option>
+                      <option value={12}>12</option>
+                      <option value={24}>24</option>
+                      <option value={48}>48</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {paginatedModels.length === 0 ? (
+                <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-12 text-center text-sm text-[#8c877e]">
+                  Nenhum modelo encontrado nesta seleção.
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-5">
+                    {paginatedModels.map((model) => {
+                      const paths = getModelImagePaths(model);
+                      const coverUrl = getSignedUrlForPath(paths[0]);
+                      return (
+                        <div
+                          key={model.id}
+                          onClick={() => handleOpenDetails(model)}
+                          className="group bg-[#0a0a0a] border border-[#262522] hover:border-[#e4e0d7]/60 rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg"
+                        >
+                          <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
+                            {coverUrl ? (
+                              <img
+                                src={coverUrl}
+                                alt={model.name}
+                                loading="lazy"
+                                className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                              />
+                            ) : (
+                              <div className="flex flex-col items-center gap-1 text-[#5e5a52]">
+                                <Box className="w-10 h-10" />
+                                <span className="text-[11px]">Sem imagem</span>
+                              </div>
+                            )}
+                            <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[#000000]/85 backdrop-blur text-[#e4e0d7] border border-[#e4e0d7]/30">
+                              {model.category}
+                            </span>
+                            {paths.length > 1 && (
+                              <span className="absolute bottom-2 right-2 px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#000000]/85 text-[#c89d66] border border-[#c89d66]/40 flex items-center gap-1">
+                                <Images className="w-3 h-3" /> {paths.length} fotos
+                              </span>
+                            )}
+                          </div>
+                          <div className="p-4 flex-1 flex flex-col justify-between space-y-3">
+                            <div>
+                              <h3 className="font-bold text-[#e4e0d7] text-sm group-hover:text-white transition line-clamp-1">
+                                {model.name}
+                              </h3>
+                              <p className="text-xs text-[#8c877e] line-clamp-2 mt-1">
+                                {model.description || 'Sem descrição.'}
+                              </p>
+                            </div>
+                            <div className="space-y-2 pt-2 border-t border-[#1c1b19]">
+                              {model.tags?.length > 0 && (
+                                <div className="flex flex-wrap gap-1">
+                                  {model.tags.slice(0, 3).map((tag, idx) => (
+                                    <span key={idx} className="px-2 py-0.5 bg-[#141413] text-[#a39e93] border border-[#262522] rounded text-[10px]">
+                                      #{tag}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              <div className="flex items-center justify-end text-[11px] text-[#e4e0d7] font-semibold">
+                                <span>Ver Fotos e Detalhes &rarr;</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <div className="text-xs text-[#8c877e]">
+                      Mostrando{' '}
+                      <strong className="text-[#e4e0d7]">{(safeCurrentPage - 1) * itemsPerPage + 1}</strong> a{' '}
+                      <strong className="text-[#e4e0d7]">{Math.min(safeCurrentPage * itemsPerPage, activeModelsSource.length)}</strong> de{' '}
+                      <strong className="text-[#e4e0d7]">{activeModelsSource.length}</strong> modelo(s)
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={safeCurrentPage === 1}
+                        onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                        className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] disabled:opacity-35 cursor-pointer"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+                      {pageNumbers.map((num) => (
+                        <button
+                          key={num}
+                          type="button"
+                          onClick={() => setCurrentPage(num)}
+                          className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold cursor-pointer ${
+                            num === safeCurrentPage
+                              ? 'bg-[#e4e0d7] text-[#000000]'
+                              : 'bg-[#000000] border border-[#262522] text-[#a39e93]'
+                          }`}
+                        >
+                          {num}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        disabled={safeCurrentPage === totalPages}
+                        onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                        className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] disabled:opacity-35 cursor-pointer"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </main>
+
+        {selectedModel && (
+          <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
+              <ImageCarouselModalHeader
+                model={selectedModel}
+                activeImageIndex={activeImageIndex}
+                setActiveImageIndex={setActiveImageIndex}
+                getSignedUrlForPath={getSignedUrlForPath}
+                setLightboxUrl={setLightboxUrl}
+                onClose={() => setSelectedModel(null)}
+              />
+              <div className="p-5 sm:p-6 space-y-4">
+                <div>
+                  <span className="px-2.5 py-1 rounded-md text-xs bg-[#e4e0d7]/15 text-[#e4e0d7]">
+                    {selectedModel.category}
+                  </span>
+                  <h2 className="text-lg font-bold text-[#e4e0d7] mt-2">{selectedModel.name}</h2>
+                </div>
+                <p className="text-sm text-[#d5d0c5]">{selectedModel.description || 'Sem descrição.'}</p>
+                {selectedModel.tags?.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {selectedModel.tags.map((t, idx) => (
+                      <span key={idx} className="px-2.5 py-0.5 bg-[#141413] text-[#a39e93] border border-[#262522] rounded text-xs">
+                        #{t}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {lightboxUrl && (
+          <div onClick={() => setLightboxUrl(null)} className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-3 cursor-zoom-out">
+            <img src={lightboxUrl} alt="Ampliada" className="max-w-full max-h-full rounded-xl border border-[#262522]" />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex items-center justify-center">
+        <RefreshCw className="w-8 h-8 animate-spin text-[#e4e0d7]" />
+      </div>
+    );
+  }
+
   if (!session) {
     return (
       <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex items-center justify-center p-4">
@@ -1486,10 +1960,11 @@ export default function App() {
                       setBulkMode(!bulkMode);
                       setSelectedModelIds([]);
                     }}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${bulkMode
-                      ? 'bg-[#e4e0d7] text-[#000000] border-[#e4e0d7]'
-                      : 'bg-[#000000] text-[#a39e93] hover:text-[#e4e0d7] border-[#262522]'
-                      }`}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${
+                      bulkMode
+                        ? 'bg-[#e4e0d7] text-[#000000] border-[#e4e0d7]'
+                        : 'bg-[#000000] text-[#a39e93] hover:text-[#e4e0d7] border-[#262522]'
+                    }`}
                   >
                     <CheckSquare className="w-3.5 h-3.5" />
                     <span>{bulkMode ? 'Sair do Modo Lote' : 'Seleção em Lote'}</span>
@@ -1519,10 +1994,11 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => setOnlyGhostFilter(!onlyGhostFilter)}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer transition ${onlyGhostFilter
-                        ? 'bg-[#b94a48] text-white border-[#b94a48]'
-                        : 'bg-[#b94a48]/15 text-[#e89b99] border-[#b94a48]/40'
-                        }`}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer transition ${
+                        onlyGhostFilter
+                          ? 'bg-[#b94a48] text-white border-[#b94a48]'
+                          : 'bg-[#b94a48]/15 text-[#e89b99] border-[#b94a48]/40'
+                      }`}
                     >
                       <AlertTriangle className="w-3.5 h-3.5" />
                       <span>{onlyGhostFilter ? 'Mostrando Apenas Ausentes' : `${ghostCount} Ausente(s) no Drive`}</span>
@@ -1645,12 +2121,13 @@ export default function App() {
                             handleOpenDetails(model);
                           }
                         }}
-                        className={`group bg-[#0a0a0a] border rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg ${isSelectedBulk
-                          ? 'border-[#c89d66] ring-2 ring-[#c89d66]/40'
-                          : isGhost
-                            ? 'border-[#b94a48]'
-                            : 'border-[#262522] hover:border-[#e4e0d7]/60'
-                          }`}
+                        className={`group bg-[#0a0a0a] border rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg ${
+                          isSelectedBulk
+                            ? 'border-[#c89d66] ring-2 ring-[#c89d66]/40'
+                            : isGhost
+                              ? 'border-[#b94a48]'
+                              : 'border-[#262522] hover:border-[#e4e0d7]/60'
+                        }`}
                       >
                         <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
                           {coverUrl ? (
@@ -1688,10 +2165,11 @@ export default function App() {
                           <button
                             type="button"
                             onClick={(e) => handleTogglePrintQueue(model, e)}
-                            className={`absolute top-2.5 right-2.5 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition cursor-pointer ${model.in_print_queue
-                              ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
-                              : 'bg-[#000000]/80 text-[#a39e93] hover:text-white border-[#262522]'
-                              }`}
+                            className={`absolute top-2.5 right-2.5 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition cursor-pointer ${
+                              model.in_print_queue
+                                ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
+                                : 'bg-[#000000]/80 text-[#a39e93] hover:text-white border-[#262522]'
+                            }`}
                           >
                             <ListOrdered className="w-3 h-3" />
                             <span>{model.in_print_queue ? 'Na Fila' : '+ Fila'}</span>
@@ -1774,10 +2252,11 @@ export default function App() {
                         key={num}
                         type="button"
                         onClick={() => setCurrentPage(num)}
-                        className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${num === safeCurrentPage
-                          ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
-                          : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7]'
-                          }`}
+                        className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                          num === safeCurrentPage
+                            ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
+                            : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7]'
+                        }`}
                       >
                         {num}
                       </button>
