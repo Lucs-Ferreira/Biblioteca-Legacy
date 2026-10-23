@@ -3,11 +3,11 @@ import { createClient } from '@supabase/supabase-js';
 import {
   Box, Upload, FolderDown, Settings, Search, Plus, ExternalLink,
   Trash2, Edit3, Eye, CheckCircle2, AlertTriangle, Folder,
-  HardDrive, RefreshCw, X, Check, FileArchive,
-  LogOut, FolderPlus, Calculator, Menu, Filter, ArrowRight,
+  HardDrive, ShieldCheck, RefreshCw, X, Check, FileArchive,
+  LogOut, FolderPlus, Tag, Calculator, Menu, Filter, ArrowRight,
   ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Share2,
   Copy, Link2, Images, ListOrdered, CheckSquare, Square, ArrowUpDown,
-  FileWarning
+  FileWarning, Layers
 } from 'lucide-react';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
@@ -137,6 +137,7 @@ export default function App() {
   const [pathUrls, setPathUrls] = useState({});
   const [loadingData, setLoadingData] = useState(false);
 
+  // Estados de Ordenação, Ações em Lote e Verificação de Ghost Files
   const [sortBy, setSortBy] = useState('newest');
   const [bulkMode, setBulkMode] = useState(false);
   const [selectedModelIds, setSelectedModelIds] = useState([]);
@@ -238,6 +239,7 @@ export default function App() {
     return Array.from(new Set([...BASE_CATEGORIES, ...custom, ...fromModels]));
   }, [settings.custom_categories, models]);
 
+  // Modelos na Fila de Impressão ordenados por Prioridade (Alta -> Normal -> Baixa)
   const queuedModels = useMemo(() => {
     return models
       .filter((m) => m.in_print_queue)
@@ -248,6 +250,7 @@ export default function App() {
       });
   }, [models]);
 
+  // Contador de Ghost Files detectados
   const ghostCount = useMemo(() => {
     return models.filter((m) => driveStatusCheck[m.id] === 'missing').length;
   }, [models, driveStatusCheck]);
@@ -282,7 +285,8 @@ export default function App() {
     if (!modelsToLoad?.length) return;
     const allPaths = [];
     modelsToLoad.forEach((m) => {
-      getModelImagePaths(m).forEach((p) => allPaths.push(p));
+      const paths = getModelImagePaths(m);
+      paths.forEach((p) => allPaths.push(p));
     });
     await ensureSignedUrlsForPaths(allPaths);
   }, [ensureSignedUrlsForPaths]);
@@ -294,6 +298,7 @@ export default function App() {
 
   useEffect(() => {
     if (!shareIdFromUrl || !supabase) return;
+
     const fetchPublicSharedCatalog = async () => {
       setSharedLoading(true);
       setSharedError('');
@@ -304,11 +309,14 @@ export default function App() {
         if (error) throw error;
         setSharedCatalogData(data);
       } catch (err) {
-        setSharedError(err.message || 'Este link compartilhado não existe ou foi desativado.');
+        setSharedError(
+          err.message || 'Este link compartilhado não existe ou foi desativado pelo proprietário.'
+        );
       } finally {
         setSharedLoading(false);
       }
     };
+
     fetchPublicSharedCatalog();
   }, [shareIdFromUrl]);
 
@@ -401,7 +409,7 @@ export default function App() {
     script.async = true;
     script.defer = true;
     document.body.appendChild(script);
-    loadJSZip().catch(() => { });
+    loadJSZip().catch(() => {});
   }, [shareIdFromUrl]);
 
   useEffect(() => {
@@ -438,24 +446,6 @@ export default function App() {
     }
   }, [session?.user?.id, shareIdFromUrl]);
 
-  // Função para buscar os dados do usuário autenticado no Google (como o e-mail)
-  const fetchUserInfo = async (tokenToUse) => {
-    try {
-      const res = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
-        headers: { Authorization: `Bearer ${tokenToUse}` }
-      });
-      if (res.ok) {
-        const info = await res.json();
-        if (info?.email) {
-          setGoogleUserEmail(info.email);
-          localStorage.setItem('stl_google_email', info.email);
-        }
-      }
-    } catch (err) {
-      console.warn('Não foi possível obter dados do usuário Google:', err);
-    }
-  };
-
   const loadUserData = async (silent = false) => {
     if (!supabase || !session?.user) return;
     if (!silent) setLoadingData(true);
@@ -477,8 +467,8 @@ export default function App() {
 
         const validSavedRefreshToken =
           cfg.google_refresh_token &&
-            cfg.google_refresh_token !== 'connected' &&
-            cfg.google_refresh_token !== 'active_session_token'
+          cfg.google_refresh_token !== 'connected' &&
+          cfg.google_refresh_token !== 'active_session_token'
             ? cfg.google_refresh_token
             : '';
 
@@ -546,6 +536,9 @@ export default function App() {
     }
   };
 
+  // ============================================================================
+  // FILA DE IMPRESSÃO (PRINT QUEUE)
+  // ============================================================================
   const handleTogglePrintQueue = async (model, e) => {
     if (e) e.stopPropagation();
     if (!supabase) return;
@@ -598,6 +591,9 @@ export default function App() {
       .eq('id', model.id);
   };
 
+  // ============================================================================
+  // AÇÕES EM LOTE (BULK ACTIONS)
+  // ============================================================================
   const toggleSelectModelForBulk = (modelId, e) => {
     if (e) e.stopPropagation();
     setSelectedModelIds((prev) =>
@@ -644,6 +640,470 @@ export default function App() {
     } finally {
       setUploading(false);
     }
+  };
+
+  const handleConfirmBulkCategoryChange = async (e) => {
+    e.preventDefault();
+    if (!supabase || selectedModelIds.length === 0) return;
+    setUploading(true);
+    try {
+      let targetFolderId = settings.root_folder_id;
+      if (settings.organize_by_subfolders && googleConnected && settings.root_folder_id) {
+        setUploadStep(`Garantindo subpasta "${bulkTargetCategory}" no Google Drive...`);
+        targetFolderId = await getTargetUploadFolderId(bulkTargetCategory);
+
+        const selectedModelsList = models.filter((m) => selectedModelIds.includes(m.id));
+        for (let i = 0; i < selectedModelsList.length; i++) {
+          const m = selectedModelsList[i];
+          if (m.drive_file_id && m.drive_folder_id && m.drive_folder_id !== targetFolderId) {
+            setUploadStep(`Movendo arquivo ${i + 1} de ${selectedModelsList.length} no Google Drive...`);
+            await googleDriveFetch(
+              `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}?addParents=${targetFolderId}&removeParents=${m.drive_folder_id}&fields=id,parents`,
+              { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
+            ).catch(() => {});
+          }
+        }
+      }
+
+      const { error } = await supabase
+        .from('stl_models')
+        .update({
+          category: bulkTargetCategory,
+          drive_folder_id: targetFolderId || settings.root_folder_id,
+          updated_at: new Date().toISOString()
+        })
+        .in('id', selectedModelIds);
+
+      if (error) throw error;
+
+      setModels((prev) =>
+        prev.map((m) =>
+          selectedModelIds.includes(m.id)
+            ? { ...m, category: bulkTargetCategory, drive_folder_id: targetFolderId || m.drive_folder_id }
+            : m
+        )
+      );
+
+      showToast(`${selectedModelIds.length} modelo(s) movido(s) para a categoria "${bulkTargetCategory}"!`);
+      setBulkCategoryModalOpen(false);
+      setSelectedModelIds([]);
+      setBulkMode(false);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setUploading(false);
+      setUploadStep('');
+    }
+  };
+
+  const handleConfirmBulkDelete = async () => {
+    if (!supabase || selectedModelIds.length === 0) return;
+    setUploading(true);
+    try {
+      const selectedModelsList = models.filter((m) => selectedModelIds.includes(m.id));
+
+      if (bulkDeleteAlsoDrive && googleConnected) {
+        for (let i = 0; i < selectedModelsList.length; i++) {
+          const m = selectedModelsList[i];
+          setUploadStep(`Excluindo do Google Drive (${i + 1}/${selectedModelsList.length}): ${m.name}...`);
+          let delRes = await googleDriveFetch(
+            `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}`,
+            { method: 'DELETE' }
+          );
+          if (!delRes.ok && delRes.status !== 404) {
+            await googleDriveFetch(
+              `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}`,
+              {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ trashed: true })
+              }
+            ).catch(() => {});
+          }
+        }
+      }
+
+      const allStoragePaths = [];
+      selectedModelsList.forEach((m) => {
+        getModelImagePaths(m).forEach((p) => allStoragePaths.push(p));
+      });
+
+      if (allStoragePaths.length > 0) {
+        await supabase.storage.from('stl-images').remove(allStoragePaths);
+        allStoragePaths.forEach((p) => delete signedPathCacheRef.current[p]);
+      }
+
+      const { error } = await supabase
+        .from('stl_models')
+        .delete()
+        .in('id', selectedModelIds);
+
+      if (error) throw error;
+
+      setModels((prev) => prev.filter((m) => !selectedModelIds.includes(m.id)));
+      showToast(`${selectedModelsList.length} modelo(s) excluído(s) com sucesso!`);
+      setBulkDeleteModalOpen(false);
+      setBulkDeleteAlsoDrive(false);
+      setSelectedModelIds([]);
+      setBulkMode(false);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setUploading(false);
+      setUploadStep('');
+    }
+  };
+
+  // ============================================================================
+  // SINCRONIZAÇÃO REVERSA (VERIFICADOR DE GHOST FILES NO GOOGLE DRIVE)
+  // ============================================================================
+  const handleScanGhostFiles = async () => {
+    if (!googleConnected) {
+      showToast('Vincule sua conta Google primeiro para verificar os arquivos no Drive.', 'error');
+      return;
+    }
+    if (models.length === 0) return;
+
+    setScanningGhostFiles(true);
+    let missingCount = 0;
+    const statusMap = { ...driveStatusCheck };
+
+    try {
+      // Verifica em lotes paralelos de 8 modelos por vez para ser super rápido
+      const chunkSize = 8;
+      for (let i = 0; i < models.length; i += chunkSize) {
+        const chunk = models.slice(i, i + chunkSize);
+        await Promise.all(
+          chunk.map(async (m) => {
+            if (!m.drive_file_id) {
+              statusMap[m.id] = 'missing';
+              missingCount++;
+              return;
+            }
+            try {
+              const res = await googleDriveFetch(
+                `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}?fields=id,trashed`
+              );
+              if (!res.ok) {
+                statusMap[m.id] = 'missing';
+                missingCount++;
+              } else {
+                const data = await res.json();
+                if (data.trashed) {
+                  statusMap[m.id] = 'missing';
+                  missingCount++;
+                } else {
+                  statusMap[m.id] = 'available';
+                }
+              }
+            } catch {
+              statusMap[m.id] = 'missing';
+              missingCount++;
+            }
+          })
+        );
+      }
+
+      setDriveStatusCheck(statusMap);
+      if (missingCount === 0) {
+        setOnlyGhostFilter(false);
+        showToast(`Tudo certo! Todos os ${models.length} arquivos ZIP estão íntegros no seu Google Drive.`);
+      } else {
+        showToast(
+          `Atenção: ${missingCount} arquivo(s) não foram encontrados ou estão na lixeira do Google Drive!`,
+          'error'
+        );
+      }
+    } catch (err) {
+      showToast(`Erro ao verificar Drive: ${err.message}`, 'error');
+    } finally {
+      setScanningGhostFiles(false);
+    }
+  };
+
+  const openShareModalWithCurrentFilters = () => {
+    const defaultTitle =
+      selectedCategory !== 'Todas'
+        ? `Vitrine: ${selectedCategory}${searchInput ? ` (${searchInput})` : ''}`
+        : searchInput
+          ? `Vitrine: "${searchInput}"`
+          : 'Catálogo Completo Biblioteca STL';
+
+    setShareForm({
+      title: defaultTitle,
+      category_filter: selectedCategory,
+      search_filter: searchInput.trim(),
+      tags_input: ''
+    });
+    setShareModalOpen(true);
+  };
+
+  const handleCreateSharedLink = async (e) => {
+    e.preventDefault();
+    if (!supabase || !session?.user) return;
+    setCreatingShareLink(true);
+    try {
+      const tagsArray = shareForm.tags_input
+        ? shareForm.tags_input.split(',').map((t) => t.trim()).filter(Boolean)
+        : [];
+
+      const { data: created, error } = await supabase
+        .from('shared_catalog_links')
+        .insert({
+          user_id: session.user.id,
+          title: shareForm.title.trim() || 'Catálogo Compartilhado',
+          category_filter: shareForm.category_filter || 'Todas',
+          search_filter: shareForm.search_filter.trim(),
+          tags_filter: tagsArray,
+          active: true
+        })
+        .select('*')
+        .single();
+
+      if (error) throw error;
+
+      setSharedLinks((prev) => [created, ...prev]);
+      const shareUrl = `${window.location.origin}/?share=${created.id}`;
+      await navigator.clipboard.writeText(shareUrl).catch(() => {});
+      showToast('Link da vitrine criado e copiado para a área de transferência!');
+    } catch (err) {
+      showToast(`Erro ao criar link: ${err.message}`, 'error');
+    } finally {
+      setCreatingShareLink(false);
+    }
+  };
+
+  const handleDeleteSharedLink = async (id) => {
+    if (!supabase) return;
+    const { error } = await supabase.from('shared_catalog_links').delete().eq('id', id);
+    if (!error) {
+      setSharedLinks((prev) => prev.filter((l) => l.id !== id));
+      showToast('Link revogado e excluído!');
+    }
+  };
+
+  const copyShareUrlToClipboard = async (id) => {
+    const url = `${window.location.origin}/?share=${id}`;
+    await navigator.clipboard.writeText(url);
+    showToast('Link copiado!');
+  };
+
+  // ============================================================================
+  // FILTRAGEM + ORDENAÇÃO AVANÇADA + PAGINAÇÃO
+  // ============================================================================
+  const activeModelsSource = useMemo(() => {
+    let baseList = [];
+
+    if (shareIdFromUrl) {
+      const list = sharedCatalogData?.models || [];
+      const q = visitorSearch.trim().toLowerCase();
+      baseList = !q
+        ? [...list]
+        : list.filter(
+            (m) =>
+              m.name?.toLowerCase().includes(q) ||
+              m.description?.toLowerCase().includes(q) ||
+              m.tags?.some((t) => t.toLowerCase().includes(q))
+          );
+    } else {
+      baseList = models.filter((m) => {
+        if (onlyGhostFilter && driveStatusCheck[m.id] !== 'missing') return false;
+        const matchesCat = selectedCategory === 'Todas' || m.category === selectedCategory;
+        if (!matchesCat) return false;
+        if (!debouncedQuery) return true;
+        return (
+          m.name?.toLowerCase().includes(debouncedQuery) ||
+          m.description?.toLowerCase().includes(debouncedQuery) ||
+          m.category?.toLowerCase().includes(debouncedQuery) ||
+          m.tags?.some((t) => t.toLowerCase().includes(debouncedQuery))
+        );
+      });
+    }
+
+    // Ordenação Avançada
+    baseList.sort((a, b) => {
+      if (sortBy === 'oldest') {
+        return new Date(a.created_at || 0) - new Date(b.created_at || 0);
+      }
+      if (sortBy === 'name_asc') {
+        return (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' });
+      }
+      if (sortBy === 'name_desc') {
+        return (b.name || '').localeCompare(a.name || '', 'pt-BR', { sensitivity: 'base' });
+      }
+      if (sortBy === 'size_desc') {
+        return Number(b.drive_file_size || 0) - Number(a.drive_file_size || 0);
+      }
+      if (sortBy === 'size_asc') {
+        return Number(a.drive_file_size || 0) - Number(b.drive_file_size || 0);
+      }
+      // Padrão: newest (Mais recentes primeiro)
+      return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+    });
+
+    return baseList;
+  }, [
+    shareIdFromUrl,
+    sharedCatalogData,
+    visitorSearch,
+    models,
+    selectedCategory,
+    debouncedQuery,
+    sortBy,
+    onlyGhostFilter,
+    driveStatusCheck
+  ]);
+
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(activeModelsSource.length / itemsPerPage));
+  }, [activeModelsSource.length, itemsPerPage]);
+
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+
+  const paginatedModels = useMemo(() => {
+    const startIndex = (safeCurrentPage - 1) * itemsPerPage;
+    return activeModelsSource.slice(startIndex, startIndex + itemsPerPage);
+  }, [activeModelsSource, safeCurrentPage, itemsPerPage]);
+
+  useEffect(() => {
+    if (paginatedModels.length > 0) {
+      ensureSignedUrlsForModels(paginatedModels);
+    }
+  }, [paginatedModels, ensureSignedUrlsForModels]);
+
+  useEffect(() => {
+    if (activeTab === 'fila' && queuedModels.length > 0) {
+      ensureSignedUrlsForModels(queuedModels);
+    }
+  }, [activeTab, queuedModels, ensureSignedUrlsForModels]);
+
+  const pageNumbers = useMemo(() => {
+    const pages = [];
+    const maxVisible = 5;
+    let start = Math.max(1, safeCurrentPage - Math.floor(maxVisible / 2));
+    let end = Math.min(totalPages, start + maxVisible - 1);
+    if (end - start + 1 < maxVisible) {
+      start = Math.max(1, end - maxVisible + 1);
+    }
+    for (let i = start; i <= end; i++) {
+      pages.push(i);
+    }
+    return pages;
+  }, [safeCurrentPage, totalPages]);
+
+  const fetchUserInfo = async (token) => {
+    try {
+      const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const info = await res.json();
+        if (info.email) {
+          setGoogleUserEmail(info.email);
+          localStorage.setItem('stl_google_email', info.email);
+        }
+      }
+    } catch {
+      // ignora
+    }
+  };
+
+  const handleConnectGoogle = () => {
+    if (!GOOGLE_CLIENT_ID) {
+      showToast('VITE_GOOGLE_CLIENT_ID não configurado.', 'error');
+      return;
+    }
+    if (!window.google?.accounts?.oauth2) {
+      showToast('Aguarde o carregamento do serviço Google...', 'error');
+      return;
+    }
+
+    const codeClient = window.google.accounts.oauth2.initCodeClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: GOOGLE_SCOPES,
+      ux_mode: 'popup',
+      access_type: 'offline',
+      prompt: 'consent',
+      callback: async (response) => {
+        if (response.error) {
+          showToast(`Erro na autorização Google: ${response.error}`, 'error');
+          return;
+        }
+
+        if (!response.code) return;
+
+        try {
+          const tokenRes = await fetch('/api/google-auth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: response.code })
+          });
+
+          const tokenData = await tokenRes.json().catch(() => ({}));
+          if (!tokenRes.ok || !tokenData.access_token) {
+            throw new Error(
+              tokenData.error ||
+                'Falha ao obter token definitivo. Verifique se GOOGLE_CLIENT_SECRET está configurado na Vercel.'
+            );
+          }
+
+          const finalRefreshToken =
+            tokenData.refresh_token ||
+            refreshTokenRef.current ||
+            settings.google_refresh_token;
+
+          saveTokenData(tokenData.access_token, tokenData.expires_in || 3500, finalRefreshToken);
+
+          if (supabase && session?.user && finalRefreshToken) {
+            await supabase
+              .from('user_settings')
+              .upsert({
+                user_id: session.user.id,
+                google_refresh_token: finalRefreshToken,
+                root_folder_id: settings.root_folder_id,
+                root_folder_name: settings.root_folder_name,
+                organize_by_subfolders: settings.organize_by_subfolders,
+                max_upload_size_mb: settings.max_upload_size_mb,
+                custom_categories: settings.custom_categories,
+                updated_at: new Date().toISOString()
+              });
+            setSettings((prev) => ({ ...prev, google_refresh_token: finalRefreshToken }));
+          }
+
+          await fetchUserInfo(tokenData.access_token);
+          showToast('Conta Google vinculada definitivamente!');
+          if (!settings.root_folder_id) {
+            openFolderPicker();
+          }
+        } catch (err) {
+          showToast(err.message, 'error');
+        }
+      }
+    });
+
+    codeClient.requestCode();
+  };
+
+  const handleDisconnectGoogle = async () => {
+    setGoogleToken('');
+    setGoogleUserEmail('');
+    setGoogleConnected(false);
+    refreshTokenRef.current = '';
+    localStorage.removeItem('stl_google_access_token');
+    localStorage.removeItem('stl_google_token_expiry');
+    localStorage.removeItem('stl_google_email');
+    localStorage.removeItem('stl_google_refresh_token');
+
+    if (supabase && session?.user) {
+      await supabase
+        .from('user_settings')
+        .upsert({
+          user_id: session.user.id,
+          google_refresh_token: null,
+          updated_at: new Date().toISOString()
+        });
+    }
+    showToast('Conta Google desconectada.');
   };
 
   const ensureSpecificSubfolderInDrive = async (folderName, parentId) => {
@@ -703,83 +1163,6 @@ export default function App() {
     return ids;
   };
 
-  // Filtro e Ordenação principal do Catálogo e da Vitrine Compartilhada
-  const activeModelsSource = useMemo(() => {
-    let baseList = [];
-
-    if (shareIdFromUrl) {
-      const list = sharedCatalogData?.models || [];
-      const q = visitorSearch.trim().toLowerCase();
-      baseList = !q
-        ? [...list]
-        : list.filter(
-          (m) =>
-            m.name?.toLowerCase().includes(q) ||
-            m.description?.toLowerCase().includes(q) ||
-            m.tags?.some((t) => t.toLowerCase().includes(q))
-        );
-    } else {
-      baseList = models.filter((m) => {
-        if (onlyGhostFilter && driveStatusCheck[m.id] !== 'missing') return false;
-        const matchesCat = selectedCategory === 'Todas' || m.category === selectedCategory;
-        if (!matchesCat) return false;
-        if (!debouncedQuery) return true;
-        return (
-          m.name?.toLowerCase().includes(debouncedQuery) ||
-          m.description?.toLowerCase().includes(debouncedQuery) ||
-          m.category?.toLowerCase().includes(debouncedQuery) ||
-          m.tags?.some((t) => t.toLowerCase().includes(debouncedQuery))
-        );
-      });
-    }
-
-    baseList.sort((a, b) => {
-      if (sortBy === 'oldest') return new Date(a.created_at || 0) - new Date(b.created_at || 0);
-      if (sortBy === 'name_asc') return (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' });
-      if (sortBy === 'name_desc') return (b.name || '').localeCompare(a.name || '', 'pt-BR', { sensitivity: 'base' });
-      if (sortBy === 'size_desc') return Number(b.drive_file_size || 0) - Number(a.drive_file_size || 0);
-      if (sortBy === 'size_asc') return Number(a.drive_file_size || 0) - Number(b.drive_file_size || 0);
-      return new Date(b.created_at || 0) - new Date(a.created_at || 0);
-    });
-
-    return baseList;
-  }, [
-    shareIdFromUrl,
-    sharedCatalogData,
-    visitorSearch,
-    models,
-    selectedCategory,
-    debouncedQuery,
-    sortBy,
-    onlyGhostFilter,
-    driveStatusCheck
-  ]);
-
-  const totalPages = useMemo(() => {
-    return Math.max(1, Math.ceil(activeModelsSource.length / itemsPerPage));
-  }, [activeModelsSource.length, itemsPerPage]);
-
-  const safeCurrentPage = Math.min(currentPage, totalPages);
-
-  const paginatedModels = useMemo(() => {
-    const startIndex = (safeCurrentPage - 1) * itemsPerPage;
-    return activeModelsSource.slice(startIndex, startIndex + itemsPerPage);
-  }, [activeModelsSource, safeCurrentPage, itemsPerPage]);
-
-  const pageNumbers = useMemo(() => {
-    const pages = [];
-    const maxVisible = 5;
-    let start = Math.max(1, safeCurrentPage - Math.floor(maxVisible / 2));
-    let end = Math.min(totalPages, start + maxVisible - 1);
-    if (end - start + 1 < maxVisible) {
-      start = Math.max(1, end - maxVisible + 1);
-    }
-    for (let i = start; i <= end; i++) {
-      pages.push(i);
-    }
-    return pages;
-  }, [safeCurrentPage, totalPages]);
-  
   const fetchRootSubfolders = async (rootIdOverride) => {
     const rootId = rootIdOverride || settings.root_folder_id;
     if (!rootId) return [];
@@ -927,303 +1310,141 @@ export default function App() {
     showToast(`Categoria "${trimmed}" salva!`);
   };
 
-  const handleConfirmBulkCategoryChange = async (e) => {
-    e.preventDefault();
-    if (!supabase || selectedModelIds.length === 0) return;
-    setUploading(true);
-    try {
-      let targetFolderId = settings.root_folder_id;
-      if (settings.organize_by_subfolders && googleConnected && settings.root_folder_id) {
-        setUploadStep(`Garantindo subpasta "${bulkTargetCategory}" no Google Drive...`);
-        targetFolderId = await getTargetUploadFolderId(bulkTargetCategory);
-
-        const selectedModelsList = models.filter((m) => selectedModelIds.includes(m.id));
-        for (let i = 0; i < selectedModelsList.length; i++) {
-          const m = selectedModelsList[i];
-          if (m.drive_file_id && m.drive_folder_id && m.drive_folder_id !== targetFolderId) {
-            setUploadStep(`Movendo arquivo ${i + 1} de ${selectedModelsList.length} no Google Drive...`);
-            await googleDriveFetch(
-              `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}?addParents=${targetFolderId}&removeParents=${m.drive_folder_id}&fields=id,parents`,
-              { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
-            ).catch(() => { });
-          }
-        }
-      }
-
-      const { error } = await supabase
-        .from('stl_models')
-        .update({
-          category: bulkTargetCategory,
-          drive_folder_id: targetFolderId || settings.root_folder_id,
+  const handleRemoveCustomCategory = async (catToRemove) => {
+    const updatedCustom = (settings.custom_categories || []).filter((c) => c !== catToRemove);
+    setSettings((prev) => ({ ...prev, custom_categories: updatedCustom }));
+    if (session?.user) {
+      localStorage.setItem(`stl_cats_${session.user.id}`, JSON.stringify(updatedCustom));
+    }
+    if (supabase && session?.user) {
+      await supabase
+        .from('user_settings')
+        .upsert({
+          user_id: session.user.id,
+          root_folder_id: settings.root_folder_id,
+          root_folder_name: settings.root_folder_name,
+          organize_by_subfolders: settings.organize_by_subfolders,
+          max_upload_size_mb: settings.max_upload_size_mb,
+          custom_categories: updatedCustom,
           updated_at: new Date().toISOString()
-        })
-        .in('id', selectedModelIds);
+        });
+    }
+    showToast(`Categoria "${catToRemove}" removida da lista.`);
+  };
 
-      if (error) throw error;
-
-      setModels((prev) =>
-        prev.map((m) =>
-          selectedModelIds.includes(m.id)
-            ? { ...m, category: bulkTargetCategory, drive_folder_id: targetFolderId || m.drive_folder_id }
-            : m
-        )
-      );
-
-      showToast(`${selectedModelIds.length} modelo(s) movido(s) para a categoria "${bulkTargetCategory}"!`);
-      setBulkCategoryModalOpen(false);
-      setSelectedModelIds([]);
-      setBulkMode(false);
+  const handleSupabaseAuth = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    if (!supabase) return;
+    try {
+      if (isSignUp) {
+        const { error } = await supabase.auth.signUp({ email, password });
+        if (error) throw error;
+        showToast('Conta criada! Verifique seu e-mail ou faça login.');
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        showToast('Bem-vindo à Biblioteca STL!');
+      }
     } catch (err) {
-      showToast(err.message, 'error');
-    } finally {
-      setUploading(false);
-      setUploadStep('');
+      setAuthError(err.message);
     }
   };
 
-  const handleConfirmBulkDelete = async () => {
-    if (!supabase || selectedModelIds.length === 0) return;
-    setUploading(true);
+  const openFolderPicker = async () => {
+    setFolderPickerOpen(true);
+    setLoadingFolders(true);
+    setPendingFolderSelection(null);
     try {
-      const selectedModelsList = models.filter((m) => selectedModelIds.includes(m.id));
+      const q = encodeURIComponent("mimeType = 'application/vnd.google-apps.folder' and trashed = false");
+      const res = await googleDriveFetch(
+        `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime)&pageSize=50`
+      );
+      if (!res.ok) throw new Error('Falha ao listar pastas do Google Drive.');
+      const data = await res.json();
+      setDriveFolders(data.files || []);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoadingFolders(false);
+    }
+  };
 
-      if (bulkDeleteAlsoDrive && googleConnected) {
-        for (let i = 0; i < selectedModelsList.length; i++) {
-          const m = selectedModelsList[i];
-          setUploadStep(`Excluindo do Google Drive (${i + 1}/${selectedModelsList.length}): ${m.name}...`);
-          let delRes = await googleDriveFetch(
-            `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}`,
-            { method: 'DELETE' }
-          );
-          if (!delRes.ok && delRes.status !== 404) {
-            await googleDriveFetch(
-              `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}`,
-              {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ trashed: true })
-              }
-            ).catch(() => { });
-          }
-        }
-      }
+  const handleCreateRootFolder = async () => {
+    if (!newFolderName.trim()) return;
+    setLoadingFolders(true);
+    try {
+      const res = await googleDriveFetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newFolderName.trim(),
+          mimeType: 'application/vnd.google-apps.folder'
+        })
+      });
+      if (!res.ok) throw new Error('Não foi possível criar a pasta no Google Drive.');
+      const created = await res.json();
+      await saveRootFolderSetting(created.id, created.name);
+      setFolderPickerOpen(false);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoadingFolders(false);
+    }
+  };
 
-      const allStoragePaths = [];
-      selectedModelsList.forEach((m) => {
-        getModelImagePaths(m).forEach((p) => allStoragePaths.push(p));
+  const saveRootFolderSetting = async (folderId, folderName) => {
+    if (!supabase || !session?.user) return;
+    const updated = {
+      ...settings,
+      root_folder_id: folderId,
+      root_folder_name: folderName,
+      organize_by_subfolders: true
+    };
+    const { error } = await supabase
+      .from('user_settings')
+      .upsert({
+        user_id: session.user.id,
+        root_folder_id: folderId,
+        root_folder_name: folderName,
+        organize_by_subfolders: true,
+        max_upload_size_mb: updated.max_upload_size_mb,
+        updated_at: new Date().toISOString()
       });
 
-      if (allStoragePaths.length > 0) {
-        await supabase.storage.from('stl-images').remove(allStoragePaths);
-        allStoragePaths.forEach((p) => delete signedPathCacheRef.current[p]);
-      }
-
-      const { error } = await supabase
-        .from('stl_models')
-        .delete()
-        .in('id', selectedModelIds);
-
-      if (error) throw error;
-
-      setModels((prev) => prev.filter((m) => !selectedModelIds.includes(m.id)));
-      showToast(`${selectedModelsList.length} modelo(s) excluído(s) com sucesso!`);
-      setBulkDeleteModalOpen(false);
-      setBulkDeleteAlsoDrive(false);
-      setSelectedModelIds([]);
-      setBulkMode(false);
-    } catch (err) {
-      showToast(err.message, 'error');
-    } finally {
-      setUploading(false);
-      setUploadStep('');
-    }
-  };
-
-  const handleScanGhostFiles = async () => {
-    if (!googleConnected) {
-      showToast('Vincule sua conta Google primeiro para verificar os arquivos no Drive.', 'error');
+    if (error) {
+      showToast(`Erro ao salvar pasta raiz: ${error.message}`, 'error');
       return;
     }
-    if (models.length === 0) return;
+    setSettings(updated);
+    setImportPipelineIds({ importacoesId: '', aguardandoId: '', importadasId: '' });
+    awaitingLoadedRef.current = false;
+    setPendingFolderSelection(null);
+    setFolderPickerOpen(false);
+    showToast(`Pasta raiz "${folderName}" vinculada! Montando subpastas...`);
 
-    setScanningGhostFiles(true);
-    let missingCount = 0;
-    const statusMap = { ...driveStatusCheck };
-
-    try {
-      const chunkSize = 8;
-      for (let i = 0; i < models.length; i += chunkSize) {
-        const chunk = models.slice(i, i + chunkSize);
-        await Promise.all(
-          chunk.map(async (m) => {
-            if (!m.drive_file_id) {
-              statusMap[m.id] = 'missing';
-              missingCount++;
-              return;
-            }
-            try {
-              const res = await googleDriveFetch(
-                `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}?fields=id,trashed`
-              );
-              if (!res.ok) {
-                statusMap[m.id] = 'missing';
-                missingCount++;
-              } else {
-                const data = await res.json();
-                if (data.trashed) {
-                  statusMap[m.id] = 'missing';
-                  missingCount++;
-                } else {
-                  statusMap[m.id] = 'available';
-                }
-              }
-            } catch {
-              statusMap[m.id] = 'missing';
-              missingCount++;
-            }
-          })
-        );
-      }
-
-      setDriveStatusCheck(statusMap);
-      if (missingCount === 0) {
-        setOnlyGhostFilter(false);
-        showToast(`Tudo certo! Todos os ${models.length} arquivos ZIP estão íntegros no seu Google Drive.`);
-      } else {
-        showToast(
-          `Atenção: ${missingCount} arquivo(s) não foram encontrados ou estão na lixeira do Google Drive!`,
-          'error'
-        );
-      }
-    } catch (err) {
-      showToast(`Erro ao verificar Drive: ${err.message}`, 'error');
-    } finally {
-      setScanningGhostFiles(false);
-    }
+    await handleSyncAllCategorySubfolders(folderId, false);
   };
 
-  const openShareModalWithCurrentFilters = () => {
-    const defaultTitle =
-      selectedCategory !== 'Todas'
-        ? `Vitrine: ${selectedCategory}${searchInput ? ` (${searchInput})` : ''}`
-        : searchInput
-          ? `Vitrine: "${searchInput}"`
-          : 'Catálogo Completo Biblioteca STL';
-
-    setShareForm({
-      title: defaultTitle,
-      category_filter: selectedCategory,
-      search_filter: searchInput.trim(),
-      tags_input: ''
-    });
-    setShareModalOpen(true);
-  };
-
-  const handleCreateSharedLink = async (e) => {
-    e.preventDefault();
+  const handleSaveGeneralSettings = async (newPartial) => {
+    const merged = { ...settings, ...newPartial };
+    setSettings(merged);
     if (!supabase || !session?.user) return;
-    setCreatingShareLink(true);
-    try {
-      const tagsArray = shareForm.tags_input
-        ? shareForm.tags_input.split(',').map((t) => t.trim()).filter(Boolean)
-        : [];
-
-      const { data: created, error } = await supabase
-        .from('shared_catalog_links')
-        .insert({
-          user_id: session.user.id,
-          title: shareForm.title.trim() || 'Catálogo Compartilhado',
-          category_filter: shareForm.category_filter || 'Todas',
-          search_filter: shareForm.search_filter.trim(),
-          tags_filter: tagsArray,
-          active: true
-        })
-        .select('*')
-        .single();
-
-      if (error) throw error;
-
-      setSharedLinks((prev) => [created, ...prev]);
-      const shareUrl = `${window.location.origin}/?share=${created.id}`;
-      await navigator.clipboard.writeText(shareUrl).catch(() => { });
-      showToast('Link da vitrine criado e copiado para a área de transferência!');
-    } catch (err) {
-      showToast(`Erro ao criar link: ${err.message}`, 'error');
-    } finally {
-      setCreatingShareLink(false);
-    }
-  };
-
-  const handleDeleteSharedLink = async (id) => {
-    if (!supabase) return;
-    const { error } = await supabase.from('shared_catalog_links').delete().eq('id', id);
-    if (!error) {
-      setSharedLinks((prev) => prev.filter((l) => l.id !== id));
-      showToast('Link revogado e excluído!');
-    }
-  };
-
-  const copyShareUrlToClipboard = async (id) => {
-    const url = `${window.location.origin}/?share=${id}`;
-    await navigator.clipboard.writeText(url);
-    showToast('Link copiado!');
-  };
-
-  const verifyDriveFileAvailability = async (model) => {
-    if (!googleConnected || shareIdFromUrl) return;
-    setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'checking' }));
-    try {
-      const res = await googleDriveFetch(
-        `https://www.googleapis.com/drive/v3/files/${model.drive_file_id}?fields=id,name,trashed`
-      );
-      if (!res.ok) {
-        setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'missing' }));
-        return;
-      }
-      const data = await res.json();
-      setDriveStatusCheck((prev) => ({
-        ...prev,
-        [model.id]: data.trashed ? 'missing' : 'available'
-      }));
-    } catch {
-      setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'missing' }));
-    }
-  };
-
-  const handleOpenDetails = (model) => {
-    setSelectedModel(model);
-    setActiveImageIndex(0);
-    const paths = getModelImagePaths(model);
-    if (paths.length > 0) {
-      ensureSignedUrlsForPaths(paths);
-    }
-    if (googleConnected && !shareIdFromUrl) {
-      verifyDriveFileAvailability(model);
-    }
-  };
-
-  const handleRetryMetadataSave = async () => {
-    if (!pendingRecovery) return;
-    setUploading(true);
-    try {
-      await completeDatabaseRegistration(
-        pendingRecovery.driveData,
-        pendingRecovery.folderId,
-        pendingRecovery.formSnapshot
-      );
-      setPendingRecovery(null);
-      setUploadForm({
-        name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFiles: []
+    await supabase
+      .from('user_settings')
+      .upsert({
+        user_id: session.user.id,
+        root_folder_id: merged.root_folder_id,
+        root_folder_name: merged.root_folder_name,
+        organize_by_subfolders: merged.organize_by_subfolders,
+        max_upload_size_mb: merged.max_upload_size_mb,
+        energy_cost_kwh: merged.energy_cost_kwh,
+        default_failure_rate: merged.default_failure_rate,
+        default_post_processing_pct: merged.default_post_processing_pct,
+        labor_hourly_rate: merged.labor_hourly_rate,
+        updated_at: new Date().toISOString()
       });
-      showToast('Cadastro recuperado e concluído com sucesso!');
-      setActiveTab('catalogo');
-      loadUserData(true);
-    } catch (err) {
-      showToast(err.message, 'error');
-    } finally {
-      setUploading(false);
-      setUploadStep('');
-    }
+    showToast('Configurações atualizadas!');
   };
 
   const uploadMultipleImagesToSupabase = async (filesArray) => {
@@ -1354,6 +1575,30 @@ export default function App() {
     });
 
     if (dbErr) throw new Error(`Falha ao salvar metadados: ${dbErr.message}`);
+  };
+
+  const handleRetryMetadataSave = async () => {
+    if (!pendingRecovery) return;
+    setUploading(true);
+    try {
+      await completeDatabaseRegistration(
+        pendingRecovery.driveData,
+        pendingRecovery.folderId,
+        pendingRecovery.formSnapshot
+      );
+      setPendingRecovery(null);
+      setUploadForm({
+        name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFiles: []
+      });
+      showToast('Cadastro recuperado e concluído com sucesso!');
+      setActiveTab('catalogo');
+      loadUserData(true);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setUploading(false);
+      setUploadStep('');
+    }
   };
 
   const fetchAwaitingImports = async () => {
@@ -1522,6 +1767,39 @@ export default function App() {
     } finally {
       setUploading(false);
       setUploadStep('');
+    }
+  };
+
+  const verifyDriveFileAvailability = async (model) => {
+    if (!googleConnected || shareIdFromUrl) return;
+    setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'checking' }));
+    try {
+      const res = await googleDriveFetch(
+        `https://www.googleapis.com/drive/v3/files/${model.drive_file_id}?fields=id,name,trashed`
+      );
+      if (!res.ok) {
+        setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'missing' }));
+        return;
+      }
+      const data = await res.json();
+      setDriveStatusCheck((prev) => ({
+        ...prev,
+        [model.id]: data.trashed ? 'missing' : 'available'
+      }));
+    } catch {
+      setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'missing' }));
+    }
+  };
+
+  const handleOpenDetails = (model) => {
+    setSelectedModel(model);
+    setActiveImageIndex(0);
+    const paths = getModelImagePaths(model);
+    if (paths.length > 0) {
+      ensureSignedUrlsForPaths(paths);
+    }
+    if (googleConnected && !shareIdFromUrl) {
+      verifyDriveFileAvailability(model);
     }
   };
 
@@ -1745,100 +2023,19 @@ export default function App() {
     };
   }, [calcForm, printers, materials, settings]);
 
-  const handleConnectGoogle = () => {
-    if (!GOOGLE_CLIENT_ID) {
-      showToast('VITE_GOOGLE_CLIENT_ID não configurado.', 'error');
-      return;
-    }
-    if (!window.google?.accounts?.oauth2) {
-      showToast('Aguarde o carregamento do serviço Google...', 'error');
-      return;
-    }
-
-    const codeClient = window.google.accounts.oauth2.initCodeClient({
-      client_id: GOOGLE_CLIENT_ID,
-      scope: GOOGLE_SCOPES,
-      ux_mode: 'popup',
-      access_type: 'offline',
-      prompt: 'consent',
-      callback: async (response) => {
-        if (response.error) {
-          showToast(`Erro na autorização Google: ${response.error}`, 'error');
-          return;
-        }
-
-        if (!response.code) return;
-
-        try {
-          const tokenRes = await fetch('/api/google-auth', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ code: response.code })
-          });
-
-          const tokenData = await tokenRes.json().catch(() => ({}));
-          if (!tokenRes.ok || !tokenData.access_token) {
-            throw new Error(
-              tokenData.error ||
-              'Falha ao obter token definitivo. Verifique se GOOGLE_CLIENT_SECRET está configurado na Vercel.'
-            );
-          }
-
-          const finalRefreshToken =
-            tokenData.refresh_token ||
-            refreshTokenRef.current ||
-            settings.google_refresh_token;
-
-          saveTokenData(tokenData.access_token, tokenData.expires_in || 3500, finalRefreshToken);
-
-          if (supabase && session?.user && finalRefreshToken) {
-            await supabase
-              .from('user_settings')
-              .upsert({
-                user_id: session.user.id,
-                google_refresh_token: finalRefreshToken,
-                root_folder_id: settings.root_folder_id,
-                root_folder_name: settings.root_folder_name,
-                organize_by_subfolders: settings.organize_by_subfolders,
-                max_upload_size_mb: settings.max_upload_size_mb,
-                custom_categories: settings.custom_categories,
-                updated_at: new Date().toISOString()
-              });
-            setSettings((prev) => ({ ...prev, google_refresh_token: finalRefreshToken }));
-          }
-
-          await fetchUserInfo(tokenData.access_token);
-          showToast('Conta Google vinculada definitivamente!');
-          if (!settings.root_folder_id) {
-            openFolderPicker();
-          }
-        } catch (err) {
-          showToast(err.message, 'error');
-        }
-      }
-    });
-
-    codeClient.requestCode();
-  };
-
-  const handleSupabaseAuth = async (e) => {
-    e.preventDefault();
-    setAuthError('');
-    if (!supabase) return;
-    try {
-      if (isSignUp) {
-        const { error } = await supabase.auth.signUp({ email, password });
-        if (error) throw error;
-        showToast('Conta criada! Verifique seu e-mail ou faça login.');
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-        showToast('Bem-vindo à Biblioteca STL!');
-      }
-    } catch (err) {
-      setAuthError(err.message);
-    }
-  };
+  const renderLogo = (sizeClass = 'w-10 h-10') => (
+    <div className={`${sizeClass} rounded-xl overflow-hidden bg-[#e4e0d7] flex items-center justify-center border border-[#262522] shrink-0`}>
+      <img
+        src="/logo.png"
+        alt="Logo"
+        className="w-full h-full object-cover"
+        onError={(e) => {
+          e.target.style.display = 'none';
+          e.target.parentElement.innerHTML = '<svg class="w-5 h-5 text-[#000000]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>';
+        }}
+      />
+    </div>
+  );
 
   const renderCategorySelector = (currentValue, onSelectChange, contextKey) => (
     <div>
@@ -1885,19 +2082,358 @@ export default function App() {
     </div>
   );
 
-  const renderLogo = (sizeClass = 'w-10 h-10') => (
-    <div className={`${sizeClass} rounded-xl overflow-hidden bg-[#e4e0d7] flex items-center justify-center border border-[#262522] shrink-0`}>
-      <img
-        src="/logo.png"
-        alt="Logo"
-        className="w-full h-full object-cover"
-        onError={(e) => {
-          e.target.style.display = 'none';
-          e.target.parentElement.innerHTML = '<svg class="w-5 h-5 text-[#000000]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>';
-        }}
-      />
-    </div>
-  );
+  const renderImageCarouselModalHeader = (model) => {
+    const paths = getModelImagePaths(model);
+    const total = paths.length;
+    const safeIdx = total > 0 ? Math.min(activeImageIndex, total - 1) : 0;
+    const currentUrl = total > 0 ? getSignedUrlForPath(paths[safeIdx]) : null;
+
+    return (
+      <div className="bg-[#000000] border-b border-[#1c1b19]">
+        <div className="aspect-video relative flex items-center justify-center overflow-hidden">
+          {currentUrl ? (
+            <>
+              <img
+                src={currentUrl}
+                alt={`${model.name} - Foto ${safeIdx + 1}`}
+                className="w-full h-full object-contain"
+              />
+              <button
+                type="button"
+                onClick={() => setLightboxUrl(currentUrl)}
+                className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-[#000000]/85 text-[#e4e0d7] text-xs flex items-center gap-1.5 border border-[#e4e0d7]/30 cursor-pointer hover:bg-[#141413]"
+              >
+                <Eye className="w-4 h-4" /> Ampliar ({safeIdx + 1}/{total})
+              </button>
+            </>
+          ) : (
+            <div className="text-[#5e5a52] text-xs flex flex-col items-center gap-1">
+              <Box className="w-10 h-10" />
+              <span>Sem imagem</span>
+            </div>
+          )}
+
+          {total > 1 && (
+            <>
+              <button
+                type="button"
+                onClick={() => setActiveImageIndex((prev) => (prev - 1 + total) % total)}
+                className="absolute left-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-[#000000]/80 hover:bg-[#e4e0d7] text-[#e4e0d7] hover:text-[#000000] border border-[#262522] cursor-pointer transition"
+                title="Foto Anterior"
+              >
+                <ChevronLeft className="w-5 h-5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveImageIndex((prev) => (prev + 1) % total)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-[#000000]/80 hover:bg-[#e4e0d7] text-[#e4e0d7] hover:text-[#000000] border border-[#262522] cursor-pointer transition"
+                title="Próxima Foto"
+              >
+                <ChevronRight className="w-5 h-5" />
+              </button>
+            </>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setSelectedModel(null)}
+            className="absolute top-3 right-3 p-2 rounded-full bg-[#000000]/80 text-[#a39e93] hover:text-white cursor-pointer"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {total > 1 && (
+          <div className="px-4 py-2.5 bg-[#050505] border-t border-[#141413] flex items-center gap-2 overflow-x-auto">
+            {paths.map((p, idx) => {
+              const thumbUrl = getSignedUrlForPath(p);
+              const isSelected = idx === safeIdx;
+              return (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setActiveImageIndex(idx)}
+                  className={`w-16 h-12 rounded-lg overflow-hidden border-2 shrink-0 transition cursor-pointer ${
+                    isSelected ? 'border-[#c89d66] scale-105' : 'border-[#262522] opacity-60 hover:opacity-100'
+                  }`}
+                >
+                  {thumbUrl ? (
+                    <img src={thumbUrl} alt={`Miniatura ${idx + 1}`} className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full bg-[#141413]" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    return (
+      <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex items-center justify-center p-6">
+        <div className="max-w-lg w-full bg-[#0a0a0a] border border-[#c89d66]/40 rounded-2xl p-6 space-y-4">
+          <div className="flex items-center gap-3 text-[#c89d66]">
+            <AlertTriangle className="w-7 h-7 shrink-0" />
+            <h1 className="text-xl font-bold">Configuração Pendente</h1>
+          </div>
+          <p className="text-sm text-[#a39e93]">Configure as variáveis do Supabase na Vercel.</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ============================================================================
+  // MODO VITRINE PÚBLICA (?share=UUID)
+  // ============================================================================
+  if (shareIdFromUrl) {
+    return (
+      <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex flex-col">
+        <header className="border-b border-[#1f1e1c] bg-[#000000]/95 backdrop-blur sticky top-0 z-30">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              {renderLogo('w-9 h-9')}
+              <div>
+                <h1 className="font-bold text-base sm:text-lg text-[#e4e0d7] leading-tight">
+                  {sharedCatalogData?.title || 'Catálogo de Modelos 3D'}
+                </h1>
+                <p className="text-[11px] text-[#c89d66]">
+                  Modo Visualização &bull; Seleção exclusiva compartilhada
+                </p>
+              </div>
+            </div>
+
+            {sharedCatalogData && (
+              <div className="flex items-center gap-2">
+                {sharedCatalogData.category_filter && sharedCatalogData.category_filter !== 'Todas' && (
+                  <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#141413] text-[#e4e0d7] border border-[#262522]">
+                    Categoria: {sharedCatalogData.category_filter}
+                  </span>
+                )}
+                <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#e4e0d7] text-[#000000]">
+                  {activeModelsSource.length} modelo(s)
+                </span>
+              </div>
+            )}
+          </div>
+        </header>
+
+        <main className="max-w-7xl mx-auto w-full px-3 sm:px-6 py-6 sm:py-8 flex-1 space-y-6">
+          {sharedLoading ? (
+            <div className="py-24 text-center text-[#a39e93] flex flex-col items-center gap-3">
+              <RefreshCw className="w-8 h-8 animate-spin text-[#e4e0d7]" />
+              <span className="text-sm">Carregando catálogo compartilhado...</span>
+            </div>
+          ) : sharedError ? (
+            <div className="max-w-md mx-auto bg-[#0a0a0a] border border-[#b94a48]/40 rounded-2xl p-8 text-center space-y-3 my-12">
+              <AlertTriangle className="w-10 h-10 text-[#d96b68] mx-auto" />
+              <h2 className="text-base font-bold text-[#e4e0d7]">Catálogo Indisponível</h2>
+              <p className="text-xs text-[#8c877e]">{sharedError}</p>
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-col sm:flex-row gap-4 items-stretch sm:items-center justify-between bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4">
+                <div className="relative w-full sm:w-80 focus-within:sm:w-96 transition-all duration-300">
+                  <Search className="w-4 h-4 text-[#8c877e] absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={visitorSearch}
+                    onChange={(e) => setVisitorSearch(e.target.value)}
+                    placeholder="Pesquisar dentro desta seleção..."
+                    className="w-full pl-10 pr-9 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none focus:border-[#e4e0d7]"
+                  />
+                  {visitorSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setVisitorSearch('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-[#8c877e] hover:text-[#e4e0d7] cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 self-end sm:self-auto">
+                  <div className="flex items-center gap-1.5">
+                    <ArrowUpDown className="w-3.5 h-3.5 text-[#c89d66]" />
+                    <select
+                      value={sortBy}
+                      onChange={(e) => setSortBy(e.target.value)}
+                      className="px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-xs text-[#e4e0d7] cursor-pointer"
+                    >
+                      <option value="newest">Mais Recentes</option>
+                      <option value="oldest">Mais Antigos</option>
+                      <option value="name_asc">Nome (A–Z)</option>
+                      <option value="name_desc">Nome (Z–A)</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-[#8c877e]">Por página:</span>
+                    <select
+                      value={itemsPerPage}
+                      onChange={(e) => setItemsPerPage(Number(e.target.value))}
+                      className="px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-xs text-[#e4e0d7] cursor-pointer"
+                    >
+                      <option value={8}>8</option>
+                      <option value={12}>12</option>
+                      <option value={24}>24</option>
+                      <option value={48}>48</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {paginatedModels.length === 0 ? (
+                <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-12 text-center text-sm text-[#8c877e]">
+                  Nenhum modelo encontrado nesta seleção.
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-5">
+                    {paginatedModels.map((model) => {
+                      const paths = getModelImagePaths(model);
+                      const coverUrl = getSignedUrlForPath(paths[0]);
+                      return (
+                        <div
+                          key={model.id}
+                          onClick={() => handleOpenDetails(model)}
+                          className="group bg-[#0a0a0a] border border-[#262522] hover:border-[#e4e0d7]/60 rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg"
+                        >
+                          <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
+                            {coverUrl ? (
+                              <img
+                                src={coverUrl}
+                                alt={model.name}
+                                loading="lazy"
+                                className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                              />
+                            ) : (
+                              <div className="flex flex-col items-center gap-1 text-[#5e5a52]">
+                                <Box className="w-10 h-10" />
+                                <span className="text-[11px]">Sem imagem</span>
+                              </div>
+                            )}
+                            <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[#000000]/85 backdrop-blur text-[#e4e0d7] border border-[#e4e0d7]/30">
+                              {model.category}
+                            </span>
+                            {paths.length > 1 && (
+                              <span className="absolute bottom-2 right-2 px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#000000]/85 text-[#c89d66] border border-[#c89d66]/40 flex items-center gap-1">
+                                <Images className="w-3 h-3" /> {paths.length} fotos
+                              </span>
+                            )}
+                          </div>
+                          <div className="p-4 flex-1 flex flex-col justify-between space-y-3">
+                            <div>
+                              <h3 className="font-bold text-[#e4e0d7] text-sm group-hover:text-white transition line-clamp-1">
+                                {model.name}
+                              </h3>
+                              <p className="text-xs text-[#8c877e] line-clamp-2 mt-1">
+                                {model.description || 'Sem descrição.'}
+                              </p>
+                            </div>
+                            <div className="space-y-2 pt-2 border-t border-[#1c1b19]">
+                              {model.tags?.length > 0 && (
+                                <div className="flex flex-wrap gap-1">
+                                  {model.tags.slice(0, 3).map((tag, idx) => (
+                                    <span key={idx} className="px-2 py-0.5 bg-[#141413] text-[#a39e93] border border-[#262522] rounded text-[10px]">
+                                      #{tag}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              <div className="flex items-center justify-end text-[11px] text-[#e4e0d7] font-semibold">
+                                <span>Ver Fotos e Detalhes &rarr;</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <div className="text-xs text-[#8c877e]">
+                      Mostrando{' '}
+                      <strong className="text-[#e4e0d7]">{(safeCurrentPage - 1) * itemsPerPage + 1}</strong> a{' '}
+                      <strong className="text-[#e4e0d7]">{Math.min(safeCurrentPage * itemsPerPage, activeModelsSource.length)}</strong> de{' '}
+                      <strong className="text-[#e4e0d7]">{activeModelsSource.length}</strong> modelo(s)
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={safeCurrentPage === 1}
+                        onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                        className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] disabled:opacity-35 cursor-pointer"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+                      {pageNumbers.map((num) => (
+                        <button
+                          key={num}
+                          type="button"
+                          onClick={() => setCurrentPage(num)}
+                          className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold cursor-pointer ${
+                            num === safeCurrentPage
+                              ? 'bg-[#e4e0d7] text-[#000000]'
+                              : 'bg-[#000000] border border-[#262522] text-[#a39e93]'
+                          }`}
+                        >
+                          {num}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        disabled={safeCurrentPage === totalPages}
+                        onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                        className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] disabled:opacity-35 cursor-pointer"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </main>
+
+        {selectedModel && (
+          <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
+              {renderImageCarouselModalHeader(selectedModel)}
+              <div className="p-5 sm:p-6 space-y-4">
+                <div>
+                  <span className="px-2.5 py-1 rounded-md text-xs bg-[#e4e0d7]/15 text-[#e4e0d7]">
+                    {selectedModel.category}
+                  </span>
+                  <h2 className="text-lg font-bold text-[#e4e0d7] mt-2">{selectedModel.name}</h2>
+                </div>
+                <p className="text-sm text-[#d5d0c5]">{selectedModel.description || 'Sem descrição.'}</p>
+                {selectedModel.tags?.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {selectedModel.tags.map((t, idx) => (
+                      <span key={idx} className="px-2.5 py-0.5 bg-[#141413] text-[#a39e93] border border-[#262522] rounded text-xs">
+                        #{t}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {lightboxUrl && (
+          <div onClick={() => setLightboxUrl(null)} className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-3 cursor-zoom-out">
+            <img src={lightboxUrl} alt="Ampliada" className="max-w-full max-h-full rounded-xl border border-[#262522]" />
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (authLoading) {
     return (
@@ -1967,7 +2503,8 @@ export default function App() {
               <Box className="w-4 h-4" /><span>Catálogo ({models.length})</span>
             </button>
             <button onClick={() => setActiveTab('fila')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'fila' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
-              <ListOrdered className="w-4 h-4" /><span>Fila ({queuedModels.length})</span>
+              <ListOrdered className="w-4 h-4" />
+              <span>Fila ({queuedModels.length})</span>
             </button>
             <button onClick={() => setActiveTab('upload')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'upload' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
               <Upload className="w-4 h-4" /><span>Enviar</span>
@@ -1987,7 +2524,8 @@ export default function App() {
               className="ml-1 px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 hover:bg-[#b94a48]/25 transition cursor-pointer"
               title="Sair da Conta"
             >
-              <LogOut className="w-4 h-4" /><span>Sair</span>
+              <LogOut className="w-4 h-4" />
+              <span>Sair</span>
             </button>
           </nav>
 
@@ -2059,6 +2597,7 @@ export default function App() {
       <main className="max-w-7xl mx-auto w-full px-3 sm:px-6 py-6 sm:py-8 flex-1">
         {activeTab === 'catalogo' && (
           <div className="space-y-5">
+            {/* Barra de Filtros, Ordenação, Lote e Sincronização Reversa */}
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5 space-y-4">
               <div className="flex flex-col lg:flex-row gap-3 items-stretch lg:items-center justify-between">
                 <div className="relative w-full lg:w-64 focus-within:lg:w-96 transition-all duration-300">
@@ -2075,6 +2614,7 @@ export default function App() {
                       type="button"
                       onClick={() => setSearchInput('')}
                       className="absolute right-3 top-1/2 -translate-y-1/2 text-[#8c877e] hover:text-[#e4e0d7] cursor-pointer"
+                      title="Limpar pesquisa"
                     >
                       <X className="w-4 h-4" />
                     </button>
@@ -2082,6 +2622,7 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2.5 justify-end">
+                  {/* Seletor de Categoria */}
                   <div className="flex items-center gap-1.5">
                     <Filter className="w-4 h-4 text-[#c89d66] shrink-0" />
                     <select
@@ -2096,6 +2637,7 @@ export default function App() {
                     </select>
                   </div>
 
+                  {/* Seletor de Ordenação Avançada */}
                   <div className="flex items-center gap-1.5">
                     <ArrowUpDown className="w-4 h-4 text-[#c89d66] shrink-0" />
                     <select
@@ -2112,6 +2654,7 @@ export default function App() {
                     </select>
                   </div>
 
+                  {/* Quantidade por Página */}
                   <div className="flex items-center gap-1.5">
                     <span className="text-xs text-[#8c877e]">Exibir:</span>
                     <select
@@ -2128,6 +2671,7 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Segunda linha de ferramentas: Seleção em Lote, Ghost Files e Compartilhamento */}
               <div className="pt-3 border-t border-[#1c1b19] flex flex-wrap items-center justify-between gap-2.5">
                 <div className="flex flex-wrap items-center gap-2">
                   <button
@@ -2136,10 +2680,11 @@ export default function App() {
                       setBulkMode(!bulkMode);
                       setSelectedModelIds([]);
                     }}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${bulkMode
-                      ? 'bg-[#e4e0d7] text-[#000000] border-[#e4e0d7]'
-                      : 'bg-[#000000] text-[#a39e93] hover:text-[#e4e0d7] border-[#262522]'
-                      }`}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${
+                      bulkMode
+                        ? 'bg-[#e4e0d7] text-[#000000] border-[#e4e0d7]'
+                        : 'bg-[#000000] text-[#a39e93] hover:text-[#e4e0d7] border-[#262522]'
+                    }`}
                   >
                     <CheckSquare className="w-3.5 h-3.5" />
                     <span>{bulkMode ? 'Sair do Modo Lote' : 'Seleção em Lote'}</span>
@@ -2160,6 +2705,7 @@ export default function App() {
                     disabled={scanningGhostFiles}
                     onClick={handleScanGhostFiles}
                     className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#000000] hover:bg-[#141413] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522] flex items-center gap-1.5 cursor-pointer transition"
+                    title="Verifica se todos os arquivos ZIP cadastrados ainda existem no Google Drive"
                   >
                     <FileWarning className={`w-3.5 h-3.5 text-[#c89d66] ${scanningGhostFiles ? 'animate-spin' : ''}`} />
                     <span>{scanningGhostFiles ? 'Verificando Drive...' : 'Verificar Arquivos no Drive'}</span>
@@ -2169,10 +2715,11 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => setOnlyGhostFilter(!onlyGhostFilter)}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer transition ${onlyGhostFilter
-                        ? 'bg-[#b94a48] text-white border-[#b94a48]'
-                        : 'bg-[#b94a48]/15 text-[#e89b99] border-[#b94a48]/40'
-                        }`}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer transition ${
+                        onlyGhostFilter
+                          ? 'bg-[#b94a48] text-white border-[#b94a48]'
+                          : 'bg-[#b94a48]/15 text-[#e89b99] border-[#b94a48]/40'
+                      }`}
                     >
                       <AlertTriangle className="w-3.5 h-3.5" />
                       <span>{onlyGhostFilter ? 'Mostrando Apenas Ausentes' : `${ghostCount} Ausente(s) no Drive`}</span>
@@ -2202,6 +2749,7 @@ export default function App() {
               </div>
             </div>
 
+            {/* BARRA DE AÇÕES EM LOTE QUANDO HÁ ITENS SELECIONADOS */}
             {bulkMode && selectedModelIds.length > 0 && (
               <div className="bg-[#141311] border border-[#c89d66] rounded-2xl p-3.5 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-2xl sticky top-20 z-20">
                 <div className="flex items-center gap-2 text-xs sm:text-sm font-bold text-[#e4e0d7]">
@@ -2295,12 +2843,13 @@ export default function App() {
                             handleOpenDetails(model);
                           }
                         }}
-                        className={`group bg-[#0a0a0a] border rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg ${isSelectedBulk
-                          ? 'border-[#c89d66] ring-2 ring-[#c89d66]/40'
-                          : isGhost
-                            ? 'border-[#b94a48]'
-                            : 'border-[#262522] hover:border-[#e4e0d7]/60'
-                          }`}
+                        className={`group bg-[#0a0a0a] border rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg ${
+                          isSelectedBulk
+                            ? 'border-[#c89d66] ring-2 ring-[#c89d66]/40'
+                            : isGhost
+                              ? 'border-[#b94a48]'
+                              : 'border-[#262522] hover:border-[#e4e0d7]/60'
+                        }`}
                       >
                         <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
                           {coverUrl ? (
@@ -2317,6 +2866,7 @@ export default function App() {
                             </div>
                           )}
 
+                          {/* Checkbox do Modo Lote ou Categoria */}
                           {bulkMode ? (
                             <button
                               type="button"
@@ -2335,18 +2885,22 @@ export default function App() {
                             </span>
                           )}
 
+                          {/* Botão Rápido da Fila de Impressão no Topo Direito */}
                           <button
                             type="button"
                             onClick={(e) => handleTogglePrintQueue(model, e)}
-                            className={`absolute top-2.5 right-2.5 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition cursor-pointer ${model.in_print_queue
-                              ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
-                              : 'bg-[#000000]/80 text-[#a39e93] hover:text-white border-[#262522]'
-                              }`}
+                            title={model.in_print_queue ? 'Na Fila de Impressão (clique para remover)' : 'Adicionar à Fila de Impressão'}
+                            className={`absolute top-2.5 right-2.5 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition cursor-pointer ${
+                              model.in_print_queue
+                                ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
+                                : 'bg-[#000000]/80 text-[#a39e93] hover:text-white border-[#262522]'
+                            }`}
                           >
                             <ListOrdered className="w-3 h-3" />
                             <span>{model.in_print_queue ? 'Na Fila' : '+ Fila'}</span>
                           </button>
 
+                          {/* Alerta de Arquivo Ausente no Drive (Ghost File) */}
                           {isGhost && (
                             <span className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#b94a48] text-white flex items-center gap-1">
                               <AlertTriangle className="w-3 h-3" /> Ausente no Drive
@@ -2386,6 +2940,7 @@ export default function App() {
                   })}
                 </div>
 
+                {/* BARRA DE PAGINAÇÃO */}
                 <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
                   <div className="text-xs text-[#8c877e]">
                     Mostrando{' '}
@@ -2405,6 +2960,7 @@ export default function App() {
                       disabled={safeCurrentPage === 1}
                       onClick={() => setCurrentPage(1)}
                       className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] disabled:opacity-35 disabled:pointer-events-none cursor-pointer transition"
+                      title="Primeira Página"
                     >
                       <ChevronsLeft className="w-4 h-4" />
                     </button>
@@ -2413,33 +2969,40 @@ export default function App() {
                       disabled={safeCurrentPage === 1}
                       onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                       className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] disabled:opacity-35 disabled:pointer-events-none cursor-pointer transition"
+                      title="Página Anterior"
                     >
                       <ChevronLeft className="w-4 h-4" />
                     </button>
 
-                    {pageNumbers[0] > 1 && <span className="px-2 text-xs text-[#6e6a61]">...</span>}
+                    {pageNumbers[0] > 1 && (
+                      <span className="px-2 text-xs text-[#6e6a61]">...</span>
+                    )}
 
                     {pageNumbers.map((num) => (
                       <button
                         key={num}
                         type="button"
                         onClick={() => setCurrentPage(num)}
-                        className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${num === safeCurrentPage
-                          ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
-                          : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7]'
-                          }`}
+                        className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                          num === safeCurrentPage
+                            ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
+                            : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] hover:border-[#e4e0d7]/40'
+                        }`}
                       >
                         {num}
                       </button>
                     ))}
 
-                    {pageNumbers[pageNumbers.length - 1] < totalPages && <span className="px-2 text-xs text-[#6e6a61]">...</span>}
+                    {pageNumbers[pageNumbers.length - 1] < totalPages && (
+                      <span className="px-2 text-xs text-[#6e6a61]">...</span>
+                    )}
 
                     <button
                       type="button"
                       disabled={safeCurrentPage === totalPages}
                       onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
                       className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] disabled:opacity-35 disabled:pointer-events-none cursor-pointer transition"
+                      title="Próxima Página"
                     >
                       <ChevronRight className="w-4 h-4" />
                     </button>
@@ -2448,6 +3011,7 @@ export default function App() {
                       disabled={safeCurrentPage === totalPages}
                       onClick={() => setCurrentPage(totalPages)}
                       className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] disabled:opacity-35 disabled:pointer-events-none cursor-pointer transition"
+                      title="Última Página"
                     >
                       <ChevronsRight className="w-4 h-4" />
                     </button>
@@ -2458,7 +3022,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ABA: FILA DE IMPRESSÃO */}
+        {/* NOVA ABA: FILA DE IMPRESSÃO (PRINT QUEUE) */}
         {activeTab === 'fila' && (
           <div className="space-y-6 max-w-5xl mx-auto">
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -2540,12 +3104,13 @@ export default function App() {
                           <select
                             value={prio}
                             onChange={(e) => handleChangeQueuePriority(model, e.target.value)}
-                            className={`px-2.5 py-1.5 rounded-xl text-xs font-bold border cursor-pointer ${prio === 'Alta'
-                              ? 'bg-[#b94a48]/20 text-[#e89b99] border-[#b94a48]/40'
-                              : prio === 'Baixa'
-                                ? 'bg-[#141413] text-[#8c877e] border-[#262522]'
-                                : 'bg-[#c89d66]/20 text-[#c89d66] border-[#c89d66]/40'
-                              }`}
+                            className={`px-2.5 py-1.5 rounded-xl text-xs font-bold border cursor-pointer ${
+                              prio === 'Alta'
+                                ? 'bg-[#b94a48]/20 text-[#e89b99] border-[#b94a48]/40'
+                                : prio === 'Baixa'
+                                  ? 'bg-[#141413] text-[#8c877e] border-[#262522]'
+                                  : 'bg-[#c89d66]/20 text-[#c89d66] border-[#c89d66]/40'
+                            }`}
                           >
                             <option value="Alta" className="bg-[#0a0a0a] text-[#e4e0d7]">Alta</option>
                             <option value="Normal" className="bg-[#0a0a0a] text-[#e4e0d7]">Normal</option>
@@ -2580,7 +3145,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ABA: ENVIAR NOVO MODELO */}
         {activeTab === 'upload' && (
           <div className="max-w-2xl mx-auto bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-6">
             <div>
@@ -2622,7 +3186,7 @@ export default function App() {
                   {uploadForm.zipFile && <p className="text-[11px] text-[#70a37f] truncate">{uploadForm.zipFile.name}</p>}
                 </div>
                 <div className="p-4 rounded-xl bg-[#000000] border border-dashed border-[#383632] space-y-2">
-                  <label className="block text-xs font-semibold text-[#c89d66]">2. Imagens de Referência (Várias)</label>
+                  <label className="block text-xs font-semibold text-[#c89d66]">2. Imagens de Referência (Pode selecionar várias)</label>
                   <input
                     type="file"
                     accept="image/*"
@@ -2667,7 +3231,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ABA: IMPORTAR */}
+        {/* ABA IMPORTAR */}
         {activeTab === 'importar' && (
           <div className="space-y-6">
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
@@ -2794,7 +3358,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ABA: CALCULADORA */}
+        {/* CALCULADORA DE GASTOS */}
         {activeTab === 'calculadora' && (
           <div className="space-y-6 max-w-4xl mx-auto">
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-5 sm:p-6 space-y-4">
@@ -2914,7 +3478,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ABA: CONFIGURAÇÕES */}
         {activeTab === 'configuracoes' && (
           <div className="max-w-3xl mx-auto space-y-6">
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-5">
@@ -3293,83 +3856,7 @@ export default function App() {
       {selectedModel && (
         <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
           <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
-            <div className="bg-[#000000] border-b border-[#1c1b19]">
-              <div className="aspect-video relative flex items-center justify-center overflow-hidden">
-                {getModelImagePaths(selectedModel).length > 0 && getSignedUrlForPath(getModelImagePaths(selectedModel)[activeImageIndex]) ? (
-                  <>
-                    <img
-                      src={getSignedUrlForPath(getModelImagePaths(selectedModel)[activeImageIndex])}
-                      alt={`${selectedModel.name} - Foto ${activeImageIndex + 1}`}
-                      className="w-full h-full object-contain"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setLightboxUrl(getSignedUrlForPath(getModelImagePaths(selectedModel)[activeImageIndex]))}
-                      className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-[#000000]/85 text-[#e4e0d7] text-xs flex items-center gap-1.5 border border-[#e4e0d7]/30 cursor-pointer hover:bg-[#141413]"
-                    >
-                      <Eye className="w-4 h-4" /> Ampliar ({activeImageIndex + 1}/{getModelImagePaths(selectedModel).length})
-                    </button>
-                  </>
-                ) : (
-                  <div className="text-[#5e5a52] text-xs flex flex-col items-center gap-1">
-                    <Box className="w-10 h-10" />
-                    <span>Sem imagem</span>
-                  </div>
-                )}
-
-                {getModelImagePaths(selectedModel).length > 1 && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => setActiveImageIndex((prev) => (prev - 1 + getModelImagePaths(selectedModel).length) % getModelImagePaths(selectedModel).length)}
-                      className="absolute left-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-[#000000]/80 hover:bg-[#e4e0d7] text-[#e4e0d7] hover:text-[#000000] border border-[#262522] cursor-pointer transition"
-                    >
-                      <ChevronLeft className="w-5 h-5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setActiveImageIndex((prev) => (prev + 1) % getModelImagePaths(selectedModel).length)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-[#000000]/80 hover:bg-[#e4e0d7] text-[#e4e0d7] hover:text-[#000000] border border-[#262522] cursor-pointer transition"
-                    >
-                      <ChevronRight className="w-5 h-5" />
-                    </button>
-                  </>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => setSelectedModel(null)}
-                  className="absolute top-3 right-3 p-2 rounded-full bg-[#000000]/80 text-[#a39e93] hover:text-white cursor-pointer"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              {getModelImagePaths(selectedModel).length > 1 && (
-                <div className="px-4 py-2.5 bg-[#050505] border-t border-[#141413] flex items-center gap-2 overflow-x-auto">
-                  {getModelImagePaths(selectedModel).map((p, idx) => {
-                    const thumbUrl = getSignedUrlForPath(p);
-                    const isSelected = idx === activeImageIndex;
-                    return (
-                      <button
-                        key={p}
-                        type="button"
-                        onClick={() => setActiveImageIndex(idx)}
-                        className={`w-16 h-12 rounded-lg overflow-hidden border-2 shrink-0 transition cursor-pointer ${isSelected ? 'border-[#c89d66] scale-105' : 'border-[#262522] opacity-60 hover:opacity-100'
-                          }`}
-                      >
-                        {thumbUrl ? (
-                          <img src={thumbUrl} alt={`Miniatura ${idx + 1}`} className="w-full h-full object-cover" />
-                        ) : (
-                          <div className="w-full h-full bg-[#141413]" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
+            {renderImageCarouselModalHeader(selectedModel)}
             <div className="p-4 sm:p-6 space-y-4 max-h-[55vh] overflow-y-auto">
               <div className="flex justify-between items-start gap-2">
                 <div>
@@ -3402,10 +3889,11 @@ export default function App() {
                   <button
                     type="button"
                     onClick={(e) => handleTogglePrintQueue(selectedModel, e)}
-                    className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer ${selectedModel.in_print_queue
-                      ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
-                      : 'bg-[#141413] text-[#e4e0d7] border-[#262522]'
-                      }`}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer ${
+                      selectedModel.in_print_queue
+                        ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
+                        : 'bg-[#141413] text-[#e4e0d7] border-[#262522]'
+                    }`}
                   >
                     <ListOrdered className="w-4 h-4" />
                     <span>{selectedModel.in_print_queue ? 'Na Fila de Impressão' : '+ Fila de Impressão'}</span>
@@ -3478,6 +3966,7 @@ export default function App() {
                             keptImagePaths: prev.keptImagePaths.filter((item) => item !== p)
                           }))}
                           className="absolute top-1 right-1 p-1 rounded-full bg-[#b94a48] text-white cursor-pointer"
+                          title="Remover esta imagem"
                         >
                           <X className="w-3 h-3" />
                         </button>
