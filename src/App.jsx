@@ -766,6 +766,20 @@ export default function App() {
     return activeModelsSource.slice(startIndex, startIndex + itemsPerPage);
   }, [activeModelsSource, safeCurrentPage, itemsPerPage]);
 
+  const pageNumbers = useMemo(() => {
+    const pages = [];
+    const maxVisible = 5;
+    let start = Math.max(1, safeCurrentPage - Math.floor(maxVisible / 2));
+    let end = Math.min(totalPages, start + maxVisible - 1);
+    if (end - start + 1 < maxVisible) {
+      start = Math.max(1, end - maxVisible + 1);
+    }
+    for (let i = start; i <= end; i++) {
+      pages.push(i);
+    }
+    return pages;
+  }, [safeCurrentPage, totalPages]);
+  
   const fetchRootSubfolders = async (rootIdOverride) => {
     const rootId = rootIdOverride || settings.root_folder_id;
     if (!rootId) return [];
