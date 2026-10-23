@@ -1018,6 +1018,40 @@ export default function App() {
     showToast('Link copiado!');
   };
 
+  const verifyDriveFileAvailability = async (model) => {
+    if (!googleConnected || shareIdFromUrl) return;
+    setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'checking' }));
+    try {
+      const res = await googleDriveFetch(
+        `https://www.googleapis.com/drive/v3/files/${model.drive_file_id}?fields=id,name,trashed`
+      );
+      if (!res.ok) {
+        setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'missing' }));
+        return;
+      }
+      const data = await res.json();
+      setDriveStatusCheck((prev) => ({
+        ...prev,
+        [model.id]: data.trashed ? 'missing' : 'available'
+      }));
+    } catch {
+      setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'missing' }));
+    }
+  };
+
+  // Função que abre o modal de detalhes e verifica o status do arquivo no Drive
+  const handleOpenDetails = (model) => {
+    setSelectedModel(model);
+    setActiveImageIndex(0);
+    const paths = getModelImagePaths(model);
+    if (paths.length > 0) {
+      ensureSignedUrlsForPaths(paths);
+    }
+    if (googleConnected && !shareIdFromUrl) {
+      verifyDriveFileAvailability(model);
+    }
+  };
+
   if (!session) {
     return (
       <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex items-center justify-center p-4">
