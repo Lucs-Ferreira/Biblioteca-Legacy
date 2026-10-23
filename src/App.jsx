@@ -1075,6 +1075,116 @@ export default function App() {
       setUploadStep('');
     }
   };
+
+  const handleUploadNewModel = async (e) => {
+    e.preventDefault();
+    if (!settings.root_folder_id) {
+      showToast('Configure a pasta raiz Biblioteca STL antes de enviar arquivos.', 'error');
+      setFolderPickerOpen(true);
+      return;
+    }
+    if (!uploadForm.zipFile) {
+      showToast('SeIecione um arquivo .ZIP para enviar.', 'error');
+      return;
+    }
+
+    const maxBytes = (settings.max_upload_size_mb || 150) * 1024 * 1024;
+    if (uploadForm.zipFile.size > maxBytes) {
+      showToast(`O arquivo excede o limite configurado de ${settings.max_upload_size_mb} MB.`, 'error');
+      return;
+    }
+
+    setUploading(true);
+    let uploadedDriveData = null;
+    let targetFolderId = settings.root_folder_id;
+
+    try {
+      setUploadStep(
+        settings.organize_by_subfolders
+          ? `Garantindo subpasta "${uploadForm.category}" no Google Drive...`
+          : 'Verificando pasta raiz no Google Drive...'
+      );
+      targetFolderId = await getTargetUploadFolderId(uploadForm.category);
+
+      setUploadStep(`Enviando arquivo ZIP para o Google Drive...`);
+      const metadata = {
+        name: uploadForm.zipFile.name,
+        parents: [targetFolderId],
+        mimeType: 'application/zip'
+      };
+
+      const formData = new FormData();
+      formData.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+      formData.append('file', uploadForm.zipFile);
+
+      const driveRes = await googleDriveFetch(
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,size,webViewLink',
+        {
+          method: 'POST',
+          body: formData
+        }
+      );
+
+      if (!driveRes.ok) {
+        const errBody = await driveRes.json().catch(() => ({}));
+        throw new Error(errBody?.error?.message || `Erro ${driveRes.status} ao enviar arquivo para o Google Drive.`);
+      }
+
+      uploadedDriveData = await driveRes.json();
+      await completeDatabaseRegistration(uploadedDriveData, targetFolderId, uploadForm);
+
+      setUploadForm({
+        name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFiles: []
+      });
+      setPendingRecovery(null);
+      showToast(`Modelo enviado para o Drive e catalogado com sucesso!`);
+      setActiveTab('catalogo');
+      loadUserData(true);
+    } catch (err) {
+      if (uploadedDriveData?.id) {
+        setPendingRecovery({
+          driveData: uploadedDriveData,
+          folderId: targetFolderId,
+          formSnapshot: { ...uploadForm }
+        });
+        showToast('O ZIP foi enviado ao Drive, mas houve falha ao salvar no banco. Use o botão de recuperação abaixo!', 'error');
+      } else {
+        showToast(err.message, 'error');
+      }
+    } finally {
+      setUploading(false);
+      setUploadStep('');
+    }
+  };
+
+  const completeDatabaseRegistration = async (driveData, folderId, formValues) => {
+    const filesToUpload = Array.isArray(formValues.imageFiles) ? formValues.imageFiles : [];
+    const uploadedPaths = await uploadMultipleImagesToSupabase(filesToUpload);
+    const primaryImagePath = uploadedPaths[0] || null;
+
+    setUploadStep('Salvando metadados e galeria no catálogo...');
+    const tagsArray = formValues.tags
+      ? formValues.tags.split(',').map((t) => t.trim()).filter(Boolean)
+      : [];
+
+    const { error: dbErr } = await supabase.from('stl_models').insert({
+      user_id: session.user.id,
+      name: formValues.name.trim() || driveData.name.replace(/\.zip$/i, ''),
+      description: formValues.description.trim(),
+      category: formValues.category || 'Geral',
+      tags: tagsArray,
+      notes: formValues.notes.trim(),
+      image_path: primaryImagePath,
+      image_paths: uploadedPaths,
+      drive_file_id: driveData.id,
+      drive_file_name: driveData.name,
+      drive_file_url: driveData.webViewLink || `https://drive.google.com/file/d/${driveData.id}/view`,
+      drive_file_size: Number(driveData.size || formValues.zipFile?.size || 0),
+      drive_folder_id: folderId
+    });
+
+    if (dbErr) throw new Error(`Falha ao salvar metadados: ${dbErr.message}`);
+  };
   
   if (!session) {
     return (
