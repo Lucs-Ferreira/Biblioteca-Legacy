@@ -375,7 +375,7 @@ export default function App() {
     script.async = true;
     script.defer = true;
     document.body.appendChild(script);
-    loadJSZip().catch(() => {});
+    loadJSZip().catch(() => { });
   }, [shareIdFromUrl]);
 
   useEffect(() => {
@@ -433,8 +433,8 @@ export default function App() {
 
         const validSavedRefreshToken =
           cfg.google_refresh_token &&
-          cfg.google_refresh_token !== 'connected' &&
-          cfg.google_refresh_token !== 'active_session_token'
+            cfg.google_refresh_token !== 'connected' &&
+            cfg.google_refresh_token !== 'active_session_token'
             ? cfg.google_refresh_token
             : '';
 
@@ -620,7 +620,7 @@ export default function App() {
             await googleDriveFetch(
               `https://www.googleapis.com/drive/v3/files/${m.drive_file_id}?addParents=${targetFolderId}&removeParents=${m.drive_folder_id}&fields=id,parents`,
               { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
-            ).catch(() => {});
+            ).catch(() => { });
           }
         }
       }
@@ -678,7 +678,7 @@ export default function App() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ trashed: true })
               }
-            ).catch(() => {});
+            ).catch(() => { });
           }
         }
       }
@@ -786,11 +786,11 @@ export default function App() {
       baseList = !q
         ? [...list]
         : list.filter(
-            (m) =>
-              m.name?.toLowerCase().includes(q) ||
-              m.description?.toLowerCase().includes(q) ||
-              m.tags?.some((t) => t.toLowerCase().includes(q))
-          );
+          (m) =>
+            m.name?.toLowerCase().includes(q) ||
+            m.description?.toLowerCase().includes(q) ||
+            m.tags?.some((t) => t.toLowerCase().includes(q))
+        );
     } else {
       baseList = models.filter((m) => {
         if (onlyGhostFilter && driveStatusCheck[m.id] !== 'missing') return false;
@@ -872,6 +872,83 @@ export default function App() {
       </div>
     );
   }
+
+  // Função para conectar a conta Google de forma definitiva via Refresh Token
+  const handleConnectGoogle = () => {
+    if (!GOOGLE_CLIENT_ID) {
+      showToast('VITE_GOOGLE_CLIENT_ID não configurado.', 'error');
+      return;
+    }
+    if (!window.google?.accounts?.oauth2) {
+      showToast('Aguarde o carregamento do serviço Google...', 'error');
+      return;
+    }
+
+    const codeClient = window.google.accounts.oauth2.initCodeClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: GOOGLE_SCOPES,
+      ux_mode: 'popup',
+      access_type: 'offline',
+      prompt: 'consent',
+      callback: async (response) => {
+        if (response.error) {
+          showToast(`Erro na autorização Google: ${response.error}`, 'error');
+          return;
+        }
+
+        if (!response.code) return;
+
+        try {
+          const tokenRes = await fetch('/api/google-auth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: response.code })
+          });
+
+          const tokenData = await tokenRes.json().catch(() => ({}));
+          if (!tokenRes.ok || !tokenData.access_token) {
+            throw new Error(
+              tokenData.error ||
+              'Falha ao obter token definitivo. Verifique se GOOGLE_CLIENT_SECRET está configurado na Vercel.'
+            );
+          }
+
+          const finalRefreshToken =
+            tokenData.refresh_token ||
+            refreshTokenRef.current ||
+            settings.google_refresh_token;
+
+          saveTokenData(tokenData.access_token, tokenData.expires_in || 3500, finalRefreshToken);
+
+          if (supabase && session?.user && finalRefreshToken) {
+            await supabase
+              .from('user_settings')
+              .upsert({
+                user_id: session.user.id,
+                google_refresh_token: finalRefreshToken,
+                root_folder_id: settings.root_folder_id,
+                root_folder_name: settings.root_folder_name,
+                organize_by_subfolders: settings.organize_by_subfolders,
+                max_upload_size_mb: settings.max_upload_size_mb,
+                custom_categories: settings.custom_categories,
+                updated_at: new Date().toISOString()
+              });
+            setSettings((prev) => ({ ...prev, google_refresh_token: finalRefreshToken }));
+          }
+
+          await fetchUserInfo(tokenData.access_token);
+          showToast('Conta Google vinculada definitivamente!');
+          if (!settings.root_folder_id) {
+            openFolderPicker();
+          }
+        } catch (err) {
+          showToast(err.message, 'error');
+        }
+      }
+    });
+
+    codeClient.requestCode();
+  };
 
   if (!session) {
     return (
@@ -1102,11 +1179,10 @@ export default function App() {
                       setBulkMode(!bulkMode);
                       setSelectedModelIds([]);
                     }}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${
-                      bulkMode
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${bulkMode
                         ? 'bg-[#e4e0d7] text-[#000000] border-[#e4e0d7]'
                         : 'bg-[#000000] text-[#a39e93] hover:text-[#e4e0d7] border-[#262522]'
-                    }`}
+                      }`}
                   >
                     <CheckSquare className="w-3.5 h-3.5" />
                     <span>{bulkMode ? 'Sair do Modo Lote' : 'Seleção em Lote'}</span>
@@ -1136,11 +1212,10 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => setOnlyGhostFilter(!onlyGhostFilter)}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer transition ${
-                        onlyGhostFilter
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer transition ${onlyGhostFilter
                           ? 'bg-[#b94a48] text-white border-[#b94a48]'
                           : 'bg-[#b94a48]/15 text-[#e89b99] border-[#b94a48]/40'
-                      }`}
+                        }`}
                     >
                       <AlertTriangle className="w-3.5 h-3.5" />
                       <span>{onlyGhostFilter ? 'Mostrando Apenas Ausentes' : `${ghostCount} Ausente(s) no Drive`}</span>
@@ -1263,13 +1338,12 @@ export default function App() {
                             handleOpenDetails(model);
                           }
                         }}
-                        className={`group bg-[#0a0a0a] border rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg ${
-                          isSelectedBulk
+                        className={`group bg-[#0a0a0a] border rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg ${isSelectedBulk
                             ? 'border-[#c89d66] ring-2 ring-[#c89d66]/40'
                             : isGhost
                               ? 'border-[#b94a48]'
                               : 'border-[#262522] hover:border-[#e4e0d7]/60'
-                        }`}
+                          }`}
                       >
                         <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
                           {coverUrl ? (
@@ -1307,11 +1381,10 @@ export default function App() {
                           <button
                             type="button"
                             onClick={(e) => handleTogglePrintQueue(model, e)}
-                            className={`absolute top-2.5 right-2.5 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition cursor-pointer ${
-                              model.in_print_queue
+                            className={`absolute top-2.5 right-2.5 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition cursor-pointer ${model.in_print_queue
                                 ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
                                 : 'bg-[#000000]/80 text-[#a39e93] hover:text-white border-[#262522]'
-                            }`}
+                              }`}
                           >
                             <ListOrdered className="w-3 h-3" />
                             <span>{model.in_print_queue ? 'Na Fila' : '+ Fila'}</span>
@@ -1394,11 +1467,10 @@ export default function App() {
                         key={num}
                         type="button"
                         onClick={() => setCurrentPage(num)}
-                        className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
-                          num === safeCurrentPage
+                        className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${num === safeCurrentPage
                             ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
                             : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7]'
-                        }`}
+                          }`}
                       >
                         {num}
                       </button>
