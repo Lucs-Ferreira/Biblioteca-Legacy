@@ -5,7 +5,7 @@ import {
   Trash2, Edit3, Eye, CheckCircle2, AlertTriangle, Folder,
   HardDrive, ShieldCheck, RefreshCw, X, Check, FileArchive,
   LogOut, FolderPlus, Tag, Calculator, Menu, Filter, ArrowRight,
-  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight
+  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Share2, Copy, Link2
 } from 'lucide-react';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
@@ -62,8 +62,21 @@ async function loadJSZip() {
 }
 
 export default function App() {
+  // Detecta se a URL possui um parâmetro ?share=UUID (Modo Vitrine Pública Sem Login)
+  const [shareIdFromUrl] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('share') || null;
+  });
+
+  // Estados exclusivos do Modo Vitrine Pública (Visitante)
+  const [sharedCatalogData, setSharedCatalogData] = useState(null);
+  const [sharedLoading, setSharedLoading] = useState(Boolean(shareIdFromUrl));
+  const [sharedError, setSharedError] = useState('');
+  const [visitorSearch, setVisitorSearch] = useState('');
+
+  // Estados de Autenticação do Proprietário
   const [session, setSession] = useState(null);
-  const [authLoading, setAuthLoading] = useState(true);
+  const [authLoading, setAuthLoading] = useState(!shareIdFromUrl);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isSignUp, setIsSignUp] = useState(false);
@@ -73,7 +86,6 @@ export default function App() {
   const [googleUserEmail, setGoogleUserEmail] = useState(() => localStorage.getItem('stl_google_email') || '');
   const [googleConnected, setGoogleConnected] = useState(false);
 
-  // Refs de controle para evitar pop-ups repetidos e chamadas concorrentes
   const refreshTokenRef = useRef(localStorage.getItem('stl_google_refresh_token') || '');
   const refreshPromiseRef = useRef(null);
   const loadedUserIdRef = useRef(null);
@@ -120,6 +132,17 @@ export default function App() {
   const [models, setModels] = useState([]);
   const [signedUrls, setSignedUrls] = useState({});
   const [loadingData, setLoadingData] = useState(false);
+
+  // Estados de Compartilhamento de Links com Filtro Travado
+  const [sharedLinks, setSharedLinks] = useState([]);
+  const [shareModalOpen, setShareModalOpen] = useState(false);
+  const [shareForm, setShareForm] = useState({
+    title: '',
+    category_filter: 'Todas',
+    search_filter: '',
+    tags_input: ''
+  });
+  const [creatingShareLink, setCreatingShareLink] = useState(false);
 
   const [activeTab, setActiveTab] = useState('catalogo');
   const [searchInput, setSearchInput] = useState('');
@@ -193,7 +216,7 @@ export default function App() {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [selectedCategory, itemsPerPage]);
+  }, [selectedCategory, itemsPerPage, visitorSearch]);
 
   const allCategories = useMemo(() => {
     const custom = Array.isArray(settings.custom_categories) ? settings.custom_categories : [];
@@ -201,8 +224,64 @@ export default function App() {
     return Array.from(new Set([...BASE_CATEGORIES, ...custom, ...fromModels]));
   }, [settings.custom_categories, models]);
 
+  // Busca em lote as URLs assinadas das imagens para a página atual (funciona tanto logado quanto no modo vitrine)
+  const ensureSignedUrlsForModels = useCallback(async (modelsToLoad) => {
+    if (!supabase || !modelsToLoad?.length) return;
+
+    const missingModels = modelsToLoad.filter(
+      (m) => m.image_path && !signedUrlsCacheRef.current[m.id]
+    );
+    if (missingModels.length === 0) return;
+
+    const paths = missingModels.map((m) => m.image_path);
+    const { data: signedList } = await supabase.storage
+      .from('stl-images')
+      .createSignedUrls(paths, 3600);
+
+    if (signedList && Array.isArray(signedList)) {
+      const newUrls = {};
+      signedList.forEach((item, index) => {
+        const model = missingModels[index];
+        if (model && item?.signedUrl) {
+          signedUrlsCacheRef.current[model.id] = item.signedUrl;
+          newUrls[model.id] = item.signedUrl;
+        }
+      });
+      if (Object.keys(newUrls).length > 0) {
+        setSignedUrls((prev) => ({ ...prev, ...newUrls }));
+      }
+    }
+  }, []);
+
   // ============================================================================
-  // GERENCIAMENTO SILENCIOSO DE TOKENS (Sem abrir pop-ups automáticos!)
+  // CARREGAMENTO DO MODO VITRINE PÚBLICA (?share=UUID) SEM LOGIN E SEM DRIVE
+  // ============================================================================
+  useEffect(() => {
+    if (!shareIdFromUrl || !supabase) return;
+
+    const fetchPublicSharedCatalog = async () => {
+      setSharedLoading(true);
+      setSharedError('');
+      try {
+        const { data, error } = await supabase.rpc('get_shared_catalog', {
+          p_share_id: shareIdFromUrl
+        });
+        if (error) throw error;
+        setSharedCatalogData(data);
+      } catch (err) {
+        setSharedError(
+          err.message || 'Este link compartilhado não existe ou foi desativado pelo proprietário.'
+        );
+      } finally {
+        setSharedLoading(false);
+      }
+    };
+
+    fetchPublicSharedCatalog();
+  }, [shareIdFromUrl]);
+
+  // ============================================================================
+  // GERENCIAMENTO SILENCIOSO DE TOKENS DO PROPRIETÁRIO
   // ============================================================================
   const saveTokenData = (accessToken, expiresInSec = 3500, newRefreshToken = null) => {
     const expiryTime = Date.now() + expiresInSec * 1000;
@@ -217,11 +296,10 @@ export default function App() {
     }
   };
 
-  // Renova o access_token em segundo plano via API da Vercel usando o refresh_token salvo no Supabase
   const refreshAccessTokenViaBackend = async (rtToUse) => {
     const rt = rtToUse || refreshTokenRef.current || localStorage.getItem('stl_google_refresh_token');
     if (!rt || rt === 'connected' || rt === 'active_session_token') {
-      throw new Error('Clique em "Conectar Conta Google" uma única vez para ativar a conexão definitiva.');
+      throw new Error('Clique em "Vincular Conta Google" uma única vez para ativar a conexão definitiva.');
     }
 
     const res = await fetch('/api/google-auth', {
@@ -239,17 +317,14 @@ export default function App() {
     return data.access_token;
   };
 
-  // Garante um token válido usando um Mutex (refreshPromiseRef) para nunca fazer várias renovações simultâneas
   const ensureValidGoogleToken = async () => {
     const storedToken = googleToken || localStorage.getItem('stl_google_access_token');
     const expiry = Number(localStorage.getItem('stl_google_token_expiry') || 0);
 
-    // Se o token atual ainda é válido por pelo menos 2 minutos, usa ele imediatamente
     if (storedToken && Date.now() < expiry - 120000) {
       return storedToken;
     }
 
-    // Se já houver uma renovação em andamento, aguarda a mesma promessa (evita loop de chamadas)
     if (refreshPromiseRef.current) {
       return refreshPromiseRef.current;
     }
@@ -291,15 +366,17 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (shareIdFromUrl) return; // Visitante não carrega scripts do Google Drive
     const script = document.createElement('script');
     script.src = 'https://accounts.google.com/gsi/client';
     script.async = true;
     script.defer = true;
     document.body.appendChild(script);
     loadJSZip().catch(() => {});
-  }, []);
+  }, [shareIdFromUrl]);
 
   useEffect(() => {
+    if (shareIdFromUrl) return;
     if (!supabase) {
       setAuthLoading(false);
       return;
@@ -321,53 +398,27 @@ export default function App() {
       }
     });
     return () => subscription.unsubscribe();
-  }, []);
+  }, [shareIdFromUrl]);
 
   useEffect(() => {
+    if (shareIdFromUrl) return;
     const currentUserId = session?.user?.id;
     if (currentUserId && loadedUserIdRef.current !== currentUserId) {
       loadedUserIdRef.current = currentUserId;
       loadUserData(false);
     }
-  }, [session?.user?.id]);
-
-  const ensureSignedUrlsForModels = useCallback(async (modelsToLoad) => {
-    if (!supabase || !modelsToLoad?.length) return;
-
-    const missingModels = modelsToLoad.filter(
-      (m) => m.image_path && !signedUrlsCacheRef.current[m.id]
-    );
-    if (missingModels.length === 0) return;
-
-    const paths = missingModels.map((m) => m.image_path);
-    const { data: signedList } = await supabase.storage
-      .from('stl-images')
-      .createSignedUrls(paths, 3600);
-
-    if (signedList && Array.isArray(signedList)) {
-      const newUrls = {};
-      signedList.forEach((item, index) => {
-        const model = missingModels[index];
-        if (model && item?.signedUrl) {
-          signedUrlsCacheRef.current[model.id] = item.signedUrl;
-          newUrls[model.id] = item.signedUrl;
-        }
-      });
-      if (Object.keys(newUrls).length > 0) {
-        setSignedUrls((prev) => ({ ...prev, ...newUrls }));
-      }
-    }
-  }, []);
+  }, [session?.user?.id, shareIdFromUrl]);
 
   const loadUserData = async (silent = false) => {
     if (!supabase || !session?.user) return;
     if (!silent) setLoadingData(true);
     try {
-      const [cfgRes, modelsRes, matRes, printRes] = await Promise.all([
+      const [cfgRes, modelsRes, matRes, printRes, linksRes] = await Promise.all([
         supabase.from('user_settings').select('*').eq('user_id', session.user.id).maybeSingle(),
         supabase.from('stl_models').select('*').order('created_at', { ascending: false }),
         supabase.from('stl_materials').select('*').order('name'),
-        supabase.from('stl_printers').select('*').order('name')
+        supabase.from('stl_printers').select('*').order('name'),
+        supabase.from('shared_catalog_links').select('*').order('created_at', { ascending: false })
       ]);
 
       const cfg = cfgRes.data;
@@ -410,13 +461,11 @@ export default function App() {
         const cachedToken = localStorage.getItem('stl_google_access_token');
         const expiry = Number(localStorage.getItem('stl_google_token_expiry') || 0);
 
-        // 1. Se o access_token no navegador ainda está válido, usa direto sem requisição
         if (cachedToken && Date.now() < expiry - 60000) {
           setGoogleToken(cachedToken);
           setGoogleConnected(true);
           fetchUserInfo(cachedToken);
         } else if (validSavedRefreshToken) {
-          // 2. Se expirou, renova silenciosamente via backend da Vercel usando o refresh_token definitivo
           try {
             const newAccess = await refreshAccessTokenViaBackend(validSavedRefreshToken);
             fetchUserInfo(newAccess);
@@ -429,8 +478,8 @@ export default function App() {
         setSettings((prev) => ({ ...prev, custom_categories: localCachedCats, organize_by_subfolders: true }));
       }
 
-      const modelList = modelsRes.data || [];
-      setModels(modelList);
+      setModels(modelsRes.data || []);
+      setSharedLinks(linksRes.data || []);
 
       const matList = matRes.data || [];
       setMaterials(matList);
@@ -450,7 +499,92 @@ export default function App() {
     }
   };
 
-  const filteredModels = useMemo(() => {
+  // ============================================================================
+  // CRIAÇÃO E GERENCIAMENTO DE LINKS COMPARTILHADOS COM FILTRO TRAVADO
+  // ============================================================================
+  const openShareModalWithCurrentFilters = () => {
+    const defaultTitle =
+      selectedCategory !== 'Todas'
+        ? `Vitrine: ${selectedCategory}${searchInput ? ` (${searchInput})` : ''}`
+        : searchInput
+          ? `Vitrine: "${searchInput}"`
+          : 'Catálogo Completo Biblioteca STL';
+
+    setShareForm({
+      title: defaultTitle,
+      category_filter: selectedCategory,
+      search_filter: searchInput.trim(),
+      tags_input: ''
+    });
+    setShareModalOpen(true);
+  };
+
+  const handleCreateSharedLink = async (e) => {
+    e.preventDefault();
+    if (!supabase || !session?.user) return;
+    setCreatingShareLink(true);
+    try {
+      const tagsArray = shareForm.tags_input
+        ? shareForm.tags_input.split(',').map((t) => t.trim()).filter(Boolean)
+        : [];
+
+      const { data: created, error } = await supabase
+        .from('shared_catalog_links')
+        .insert({
+          user_id: session.user.id,
+          title: shareForm.title.trim() || 'Catálogo Compartilhado',
+          category_filter: shareForm.category_filter || 'Todas',
+          search_filter: shareForm.search_filter.trim(),
+          tags_filter: tagsArray,
+          active: true
+        })
+        .select('*')
+        .single();
+
+      if (error) throw error;
+
+      setSharedLinks((prev) => [created, ...prev]);
+      const shareUrl = `${window.location.origin}/?share=${created.id}`;
+      await navigator.clipboard.writeText(shareUrl).catch(() => {});
+      showToast('Link da vitrine criado e copiado para a área de transferência!');
+    } catch (err) {
+      showToast(`Erro ao criar link (verifique se executou o SQL no Supabase): ${err.message}`, 'error');
+    } finally {
+      setCreatingShareLink(false);
+    }
+  };
+
+  const handleDeleteSharedLink = async (id) => {
+    if (!supabase) return;
+    const { error } = await supabase.from('shared_catalog_links').delete().eq('id', id);
+    if (!error) {
+      setSharedLinks((prev) => prev.filter((l) => l.id !== id));
+      showToast('Link revogado e excluído! Ninguém mais poderá acessá-lo.');
+    }
+  };
+
+  const copyShareUrlToClipboard = async (id) => {
+    const url = `${window.location.origin}/?share=${id}`;
+    await navigator.clipboard.writeText(url);
+    showToast('Link copiado!');
+  };
+
+  // ============================================================================
+  // FILTRAGEM E PAGINAÇÃO (TANTO PARA PROPRIETÁRIO QUANTO PARA VISITANTE)
+  // ============================================================================
+  const activeModelsSource = useMemo(() => {
+    if (shareIdFromUrl) {
+      const list = sharedCatalogData?.models || [];
+      const q = visitorSearch.trim().toLowerCase();
+      if (!q) return list;
+      return list.filter(
+        (m) =>
+          m.name?.toLowerCase().includes(q) ||
+          m.description?.toLowerCase().includes(q) ||
+          m.tags?.some((t) => t.toLowerCase().includes(q))
+      );
+    }
+
     return models.filter((m) => {
       const matchesCat = selectedCategory === 'Todas' || m.category === selectedCategory;
       if (!matchesCat) return false;
@@ -462,18 +596,18 @@ export default function App() {
         m.tags?.some((t) => t.toLowerCase().includes(debouncedQuery))
       );
     });
-  }, [models, selectedCategory, debouncedQuery]);
+  }, [shareIdFromUrl, sharedCatalogData, visitorSearch, models, selectedCategory, debouncedQuery]);
 
   const totalPages = useMemo(() => {
-    return Math.max(1, Math.ceil(filteredModels.length / itemsPerPage));
-  }, [filteredModels.length, itemsPerPage]);
+    return Math.max(1, Math.ceil(activeModelsSource.length / itemsPerPage));
+  }, [activeModelsSource.length, itemsPerPage]);
 
   const safeCurrentPage = Math.min(currentPage, totalPages);
 
   const paginatedModels = useMemo(() => {
     const startIndex = (safeCurrentPage - 1) * itemsPerPage;
-    return filteredModels.slice(startIndex, startIndex + itemsPerPage);
-  }, [filteredModels, safeCurrentPage, itemsPerPage]);
+    return activeModelsSource.slice(startIndex, startIndex + itemsPerPage);
+  }, [activeModelsSource, safeCurrentPage, itemsPerPage]);
 
   useEffect(() => {
     if (paginatedModels.length > 0) {
@@ -512,9 +646,6 @@ export default function App() {
     }
   };
 
-  // ============================================================================
-  // VINCULAÇÃO DEFINITIVA (1 ÚNICA VEZ) COM REFRESH TOKEN OFFLINE
-  // ============================================================================
   const handleConnectGoogle = () => {
     if (!GOOGLE_CLIENT_ID) {
       showToast('VITE_GOOGLE_CLIENT_ID não configurado.', 'error');
@@ -525,7 +656,6 @@ export default function App() {
       return;
     }
 
-    // Usa initCodeClient (Authorization Code Flow) para obter um refresh_token real e vitalício
     const codeClient = window.google.accounts.oauth2.initCodeClient({
       client_id: GOOGLE_CLIENT_ID,
       scope: GOOGLE_SCOPES,
@@ -541,7 +671,6 @@ export default function App() {
         if (!response.code) return;
 
         try {
-          // Troca o código pelo access_token + refresh_token através da API da Vercel
           const tokenRes = await fetch('/api/google-auth', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -580,7 +709,7 @@ export default function App() {
           }
 
           await fetchUserInfo(tokenData.access_token);
-          showToast('Conta Google vinculada definitivamente! Você não precisará conectar novamente.');
+          showToast('Conta Google vinculada definitivamente!');
           if (!settings.root_folder_id) {
             openFolderPicker();
           }
@@ -1267,7 +1396,7 @@ export default function App() {
   };
 
   const verifyDriveFileAvailability = async (model) => {
-    if (!googleConnected) return;
+    if (!googleConnected || shareIdFromUrl) return;
     setDriveStatusCheck((prev) => ({ ...prev, [model.id]: 'checking' }));
     try {
       const res = await googleDriveFetch(
@@ -1289,7 +1418,7 @@ export default function App() {
 
   const handleOpenDetails = (model) => {
     setSelectedModel(model);
-    if (googleConnected) {
+    if (googleConnected && !shareIdFromUrl) {
       verifyDriveFileAvailability(model);
     }
   };
@@ -1524,7 +1653,7 @@ export default function App() {
   const renderCategorySelector = (currentValue, onSelectChange, contextKey) => (
     <div>
       <div className="flex items-center justify-between mb-1">
-        <label className="block text-xs font-medium text-[#a39e93]">Categorias</label>
+        <label className="block text-xs font-medium text-[#a39e93]">Categoria (Subpasta no Drive)</label>
         <button
           type="button"
           onClick={() => { setAddingCategoryContext(addingCategoryContext === contextKey ? null : contextKey); setNewCategoryName(''); }}
@@ -1580,6 +1709,264 @@ export default function App() {
     );
   }
 
+  // ============================================================================
+  // RENDERIZAÇÃO DO MODO VITRINE PÚBLICA (?share=UUID) — SEM LOGIN E SEM DRIVE
+  // ============================================================================
+  if (shareIdFromUrl) {
+    return (
+      <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex flex-col">
+        <header className="border-b border-[#1f1e1c] bg-[#000000]/95 backdrop-blur sticky top-0 z-30">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              {renderLogo('w-9 h-9')}
+              <div>
+                <h1 className="font-bold text-base sm:text-lg text-[#e4e0d7] leading-tight">
+                  {sharedCatalogData?.title || 'Catálogo de Modelos 3D'}
+                </h1>
+                <p className="text-[11px] text-[#c89d66]">
+                  Modo Visualização &bull; Seleção exclusiva compartilhada
+                </p>
+              </div>
+            </div>
+
+            {sharedCatalogData && (
+              <div className="flex items-center gap-2">
+                {sharedCatalogData.category_filter && sharedCatalogData.category_filter !== 'Todas' && (
+                  <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#141413] text-[#e4e0d7] border border-[#262522]">
+                    Categoria: {sharedCatalogData.category_filter}
+                  </span>
+                )}
+                <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#e4e0d7] text-[#000000]">
+                  {activeModelsSource.length} modelo(s)
+                </span>
+              </div>
+            )}
+          </div>
+        </header>
+
+        <main className="max-w-7xl mx-auto w-full px-3 sm:px-6 py-6 sm:py-8 flex-1 space-y-6">
+          {sharedLoading ? (
+            <div className="py-24 text-center text-[#a39e93] flex flex-col items-center gap-3">
+              <RefreshCw className="w-8 h-8 animate-spin text-[#e4e0d7]" />
+              <span className="text-sm">Carregando catálogo compartilhado...</span>
+            </div>
+          ) : sharedError ? (
+            <div className="max-w-md mx-auto bg-[#0a0a0a] border border-[#b94a48]/40 rounded-2xl p-8 text-center space-y-3 my-12">
+              <AlertTriangle className="w-10 h-10 text-[#d96b68] mx-auto" />
+              <h2 className="text-base font-bold text-[#e4e0d7]">Catálogo Indisponível</h2>
+              <p className="text-xs text-[#8c877e]">{sharedError}</p>
+            </div>
+          ) : (
+            <>
+              {/* Barra de busca interna restrita apenas aos itens que o proprietário liberou neste link */}
+              <div className="flex flex-col sm:flex-row gap-4 items-stretch sm:items-center justify-between bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4">
+                <div className="relative w-full sm:w-80 focus-within:sm:w-96 transition-all duration-300">
+                  <Search className="w-4 h-4 text-[#8c877e] absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={visitorSearch}
+                    onChange={(e) => setVisitorSearch(e.target.value)}
+                    placeholder="Pesquisar dentro desta seleção..."
+                    className="w-full pl-10 pr-9 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none focus:border-[#e4e0d7]"
+                  />
+                  {visitorSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setVisitorSearch('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-[#8c877e] hover:text-[#e4e0d7] cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2 self-end sm:self-auto">
+                  <span className="text-xs text-[#8c877e]">Por página:</span>
+                  <select
+                    value={itemsPerPage}
+                    onChange={(e) => setItemsPerPage(Number(e.target.value))}
+                    className="px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-xs text-[#e4e0d7] cursor-pointer"
+                  >
+                    <option value={8}>8</option>
+                    <option value={12}>12</option>
+                    <option value={24}>24</option>
+                    <option value={48}>48</option>
+                  </select>
+                </div>
+              </div>
+
+              {paginatedModels.length === 0 ? (
+                <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-12 text-center text-sm text-[#8c877e]">
+                  Nenhum modelo encontrado nesta seleção.
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-5">
+                    {paginatedModels.map((model) => {
+                      const imgUrl = signedUrls[model.id] || signedUrlsCacheRef.current[model.id];
+                      return (
+                        <div
+                          key={model.id}
+                          onClick={() => setSelectedModel(model)}
+                          className="group bg-[#0a0a0a] border border-[#262522] hover:border-[#e4e0d7]/60 rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg"
+                        >
+                          <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
+                            {imgUrl ? (
+                              <img
+                                src={imgUrl}
+                                alt={model.name}
+                                loading="lazy"
+                                className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                              />
+                            ) : (
+                              <div className="flex flex-col items-center gap-1 text-[#5e5a52]">
+                                <Box className="w-10 h-10" />
+                                <span className="text-[11px]">Sem imagem</span>
+                              </div>
+                            )}
+                            <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[#000000]/85 backdrop-blur text-[#e4e0d7] border border-[#e4e0d7]/30">
+                              {model.category}
+                            </span>
+                          </div>
+                          <div className="p-4 flex-1 flex flex-col justify-between space-y-3">
+                            <div>
+                              <h3 className="font-bold text-[#e4e0d7] text-sm group-hover:text-white transition line-clamp-1">
+                                {model.name}
+                              </h3>
+                              <p className="text-xs text-[#8c877e] line-clamp-2 mt-1">
+                                {model.description || 'Sem descrição.'}
+                              </p>
+                            </div>
+                            <div className="space-y-2 pt-2 border-t border-[#1c1b19]">
+                              {model.tags?.length > 0 && (
+                                <div className="flex flex-wrap gap-1">
+                                  {model.tags.slice(0, 3).map((tag, idx) => (
+                                    <span key={idx} className="px-2 py-0.5 bg-[#141413] text-[#a39e93] border border-[#262522] rounded text-[10px]">
+                                      #{tag}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              <div className="flex items-center justify-end text-[11px] text-[#e4e0d7] font-semibold">
+                                <span>Ver Foto e Detalhes &rarr;</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Paginação do Visitante */}
+                  <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <div className="text-xs text-[#8c877e]">
+                      Mostrando{' '}
+                      <strong className="text-[#e4e0d7]">{(safeCurrentPage - 1) * itemsPerPage + 1}</strong> a{' '}
+                      <strong className="text-[#e4e0d7]">{Math.min(safeCurrentPage * itemsPerPage, activeModelsSource.length)}</strong> de{' '}
+                      <strong className="text-[#e4e0d7]">{activeModelsSource.length}</strong> modelo(s)
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={safeCurrentPage === 1}
+                        onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                        className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] disabled:opacity-35 cursor-pointer"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+                      {pageNumbers.map((num) => (
+                        <button
+                          key={num}
+                          type="button"
+                          onClick={() => setCurrentPage(num)}
+                          className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold cursor-pointer ${
+                            num === safeCurrentPage
+                              ? 'bg-[#e4e0d7] text-[#000000]'
+                              : 'bg-[#000000] border border-[#262522] text-[#a39e93]'
+                          }`}
+                        >
+                          {num}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        disabled={safeCurrentPage === totalPages}
+                        onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                        className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] disabled:opacity-35 cursor-pointer"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </main>
+
+        {/* Modal de Detalhes Somente Leitura para o Visitante */}
+        {selectedModel && (
+          <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
+              <div className="aspect-video bg-[#000000] relative flex items-center justify-center border-b border-[#1c1b19]">
+                {(signedUrls[selectedModel.id] || signedUrlsCacheRef.current[selectedModel.id]) ? (
+                  <>
+                    <img
+                      src={signedUrls[selectedModel.id] || signedUrlsCacheRef.current[selectedModel.id]}
+                      alt={selectedModel.name}
+                      className="w-full h-full object-contain"
+                    />
+                    <button
+                      onClick={() => setLightboxUrl(signedUrls[selectedModel.id] || signedUrlsCacheRef.current[selectedModel.id])}
+                      className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-[#000000]/85 text-[#e4e0d7] text-xs flex items-center gap-1.5 border border-[#e4e0d7]/30 cursor-pointer"
+                    >
+                      <Eye className="w-4 h-4" /> Ampliar Imagem
+                    </button>
+                  </>
+                ) : (
+                  <div className="text-[#5e5a52] text-xs">Sem imagem</div>
+                )}
+                <button
+                  onClick={() => setSelectedModel(null)}
+                  className="absolute top-3 right-3 p-2 rounded-full bg-[#000000]/80 text-[#a39e93] cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="p-5 sm:p-6 space-y-4">
+                <div>
+                  <span className="px-2.5 py-1 rounded-md text-xs bg-[#e4e0d7]/15 text-[#e4e0d7]">
+                    {selectedModel.category}
+                  </span>
+                  <h2 className="text-lg font-bold text-[#e4e0d7] mt-2">{selectedModel.name}</h2>
+                </div>
+                <p className="text-sm text-[#d5d0c5]">{selectedModel.description || 'Sem descrição.'}</p>
+                {selectedModel.tags?.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {selectedModel.tags.map((t, idx) => (
+                      <span key={idx} className="px-2.5 py-0.5 bg-[#141413] text-[#a39e93] border border-[#262522] rounded text-xs">
+                        #{t}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {lightboxUrl && (
+          <div onClick={() => setLightboxUrl(null)} className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-3 cursor-zoom-out">
+            <img src={lightboxUrl} alt="Ampliada" className="max-w-full max-h-full rounded-xl border border-[#262522]" />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ============================================================================
+  // FLUXO NORMAL DO PROPRIETÁRIO (COM LOGIN)
+  // ============================================================================
   if (authLoading) {
     return (
       <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex items-center justify-center">
@@ -1736,7 +2123,7 @@ export default function App() {
         {activeTab === 'catalogo' && (
           <div className="space-y-6">
             <div className="flex flex-col lg:flex-row gap-4 items-stretch lg:items-center justify-between bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
-              <div className="relative w-full lg:w-72 focus-within:lg:w-[440px] transition-all duration-300">
+              <div className="relative w-full lg:w-64 focus-within:lg:w-96 transition-all duration-300">
                 <Search className="w-4 h-4 text-[#8c877e] absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
@@ -1757,13 +2144,13 @@ export default function App() {
                 )}
               </div>
 
-              <div className="flex flex-wrap sm:flex-nowrap items-center gap-3 w-full lg:w-auto justify-end">
+              <div className="flex flex-wrap items-center gap-2.5 w-full lg:w-auto justify-end">
                 <div className="flex items-center gap-2 flex-1 sm:flex-initial">
                   <Filter className="w-4 h-4 text-[#c89d66] shrink-0" />
                   <select
                     value={selectedCategory}
                     onChange={(e) => setSelectedCategory(e.target.value)}
-                    className="w-full sm:w-56 px-3.5 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-xs sm:text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7] cursor-pointer"
+                    className="w-full sm:w-52 px-3.5 py-2.5 bg-[#000000] border border-[#262522] rounded-xl text-xs sm:text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7] cursor-pointer"
                   >
                     <option value="Todas" className="bg-[#0a0a0a] text-[#e4e0d7]">Todas as Categorias ({models.length})</option>
                     {allCategories.map((cat) => (
@@ -1788,6 +2175,17 @@ export default function App() {
                   </select>
                 </div>
 
+                {/* BOTÃO PARA GERAR LINK COMPARTILHADO COM O FILTRO ATUAL */}
+                <button
+                  type="button"
+                  onClick={openShareModalWithCurrentFilters}
+                  className="px-3.5 py-2.5 rounded-xl bg-[#c89d66] hover:bg-[#b88c56] text-[#000000] text-xs font-bold flex items-center gap-1.5 cursor-pointer transition shrink-0"
+                  title="Gerar link de visualização pública com o filtro escolhido"
+                >
+                  <Share2 className="w-4 h-4" />
+                  <span>Compartilhar Vitrine</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={() => loadUserData(false)}
@@ -1804,7 +2202,7 @@ export default function App() {
                 <RefreshCw className="w-7 h-7 animate-spin text-[#e4e0d7]" />
                 <span className="text-sm">Carregando seus modelos 3D...</span>
               </div>
-            ) : filteredModels.length === 0 ? (
+            ) : activeModelsSource.length === 0 ? (
               <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 sm:p-12 text-center space-y-4">
                 <FileArchive className="w-12 h-12 text-[#5e5a52] mx-auto" />
                 <div className="space-y-1">
@@ -1891,9 +2289,9 @@ export default function App() {
                     </strong>{' '}
                     a{' '}
                     <strong className="text-[#e4e0d7]">
-                      {Math.min(safeCurrentPage * itemsPerPage, filteredModels.length)}
+                      {Math.min(safeCurrentPage * itemsPerPage, activeModelsSource.length)}
                     </strong>{' '}
-                    de <strong className="text-[#e4e0d7]">{filteredModels.length}</strong> modelo(s)
+                    de <strong className="text-[#e4e0d7]">{activeModelsSource.length}</strong> modelo(s)
                   </div>
 
                   <div className="flex items-center gap-1.5">
@@ -2382,6 +2780,141 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* MODAL PARA CRIAR E GERENCIAR LINKS COMPARTILHADOS COM FILTRO TRAVADO */}
+      {shareModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 overflow-y-auto">
+          <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-xl w-full p-6 space-y-5 my-auto max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-start">
+              <div>
+                <h3 className="font-bold text-[#e4e0d7] text-base flex items-center gap-2">
+                  <Share2 className="w-5 h-5 text-[#c89d66]" />
+                  <span>Compartilhar Catálogo (Somente Visualização)</span>
+                </h3>
+                <p className="text-xs text-[#8c877e] mt-1">
+                  A pessoa que receber o link verá <strong>apenas</strong> os modelos que corresponderem ao filtro abaixo, sem precisar logar e sem acesso aos seus arquivos ZIP do Drive.
+                </p>
+              </div>
+              <button onClick={() => setShareModalOpen(false)} className="text-[#8c877e] hover:text-white cursor-pointer">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateSharedLink} className="space-y-4 p-4 rounded-xl bg-[#000000] border border-[#262522]">
+              <div>
+                <label className="block text-xs font-medium text-[#a39e93] mb-1">Título da Vitrine (aparece no topo para o visitante)</label>
+                <input
+                  type="text"
+                  required
+                  value={shareForm.title}
+                  onChange={(e) => setShareForm({ ...shareForm, title: e.target.value })}
+                  placeholder="Ex: Catálogo de Miniaturas RPG"
+                  className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Travar na Categoria:</label>
+                  <select
+                    value={shareForm.category_filter}
+                    onChange={(e) => setShareForm({ ...shareForm, category_filter: e.target.value })}
+                    className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
+                  >
+                    <option value="Todas">Todas as Categorias</option>
+                    {allCategories.map((cat) => (
+                      <option key={cat} value={cat}>{cat}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Travar por Termo de Busca (Opcional):</label>
+                  <input
+                    type="text"
+                    value={shareForm.search_filter}
+                    onChange={(e) => setShareForm({ ...shareForm, search_filter: e.target.value })}
+                    placeholder="Ex: dragao, suporte..."
+                    className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-[#a39e93] mb-1">Travar por Tags específicas (separadas por vírgula - Opcional):</label>
+                <input
+                  type="text"
+                  value={shareForm.tags_input}
+                  onChange={(e) => setShareForm({ ...shareForm, tags_input: e.target.value })}
+                  placeholder="Ex: rpg, articulado"
+                  className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
+                />
+              </div>
+
+              <div className="flex justify-end pt-1">
+                <button
+                  type="submit"
+                  disabled={creatingShareLink}
+                  className="px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Link2 className="w-4 h-4" />
+                  <span>{creatingShareLink ? 'Gerando Link...' : 'Gerar e Copiar Link'}</span>
+                </button>
+              </div>
+            </form>
+
+            {/* Lista de Links Ativos */}
+            <div className="space-y-2.5">
+              <h4 className="text-xs font-semibold text-[#a39e93] uppercase tracking-wider">
+                Links Compartilhados Criados ({sharedLinks.length})
+              </h4>
+              {sharedLinks.length === 0 ? (
+                <p className="text-xs text-[#6e6a61] py-3 text-center">Nenhum link compartilhado gerado ainda.</p>
+              ) : (
+                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                  {sharedLinks.map((link) => (
+                    <div key={link.id} className="p-3 rounded-xl bg-[#000000] border border-[#262522] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                      <div className="space-y-0.5 truncate">
+                        <strong className="text-[#e4e0d7] block truncate">{link.title}</strong>
+                        <span className="text-[11px] text-[#8c877e]">
+                          Categoria: <strong className="text-[#c89d66]">{link.category_filter}</strong>
+                          {link.search_filter ? ` • Busca: "${link.search_filter}"` : ''}
+                          {link.tags_filter?.length > 0 ? ` • Tags: ${link.tags_filter.join(', ')}` : ''}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => copyShareUrlToClipboard(link.id)}
+                          className="px-2.5 py-1.5 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-lg flex items-center gap-1 cursor-pointer"
+                        >
+                          <Copy className="w-3.5 h-3.5" /> Copiar
+                        </button>
+                        <a
+                          href={`/?share=${link.id}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-2.5 py-1.5 bg-[#141413] hover:bg-[#1f1e1c] text-[#c89d66] border border-[#262522] rounded-lg flex items-center gap-1"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" /> Testar
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteSharedLink(link.id)}
+                          className="p-1.5 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-lg cursor-pointer"
+                          title="Revogar Link"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL NOVO MATERIAL */}
       {newMaterialModal && (
