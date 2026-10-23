@@ -1185,6 +1185,51 @@ export default function App() {
 
     if (dbErr) throw new Error(`Falha ao salvar metadados: ${dbErr.message}`);
   };
+
+  const renderCategorySelector = (currentValue, onSelectChange, contextKey) => (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <label className="block text-xs font-medium text-[#a39e93]">Categoria (Subpasta no Drive)</label>
+        <button
+          type="button"
+          onClick={() => { setAddingCategoryContext(addingCategoryContext === contextKey ? null : contextKey); setNewCategoryName(''); }}
+          className="text-[11px] font-semibold text-[#e4e0d7] hover:text-white flex items-center gap-1 cursor-pointer transition"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          <span>{addingCategoryContext === contextKey ? 'Cancelar' : 'Nova Categoria'}</span>
+        </button>
+      </div>
+
+      {addingCategoryContext === contextKey ? (
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={newCategoryName}
+            onChange={(e) => setNewCategoryName(e.target.value)}
+            placeholder="Nome da categoria..."
+            autoFocus
+            className="flex-1 px-3 py-2 bg-[#000000] border border-[#e4e0d7] rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none"
+          />
+          <button
+            type="button"
+            disabled={savingCategory}
+            onClick={() => handleAddPermanentCategory(contextKey)}
+            className="px-3.5 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold cursor-pointer shrink-0 transition"
+          >
+            Salvar
+          </button>
+        </div>
+      ) : (
+        <select
+          value={currentValue}
+          onChange={(e) => onSelectChange(e.target.value)}
+          className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] focus:outline-none focus:border-[#e4e0d7]"
+        >
+          {allCategories.map((c) => <option key={c} value={c} className="bg-[#0a0a0a] text-[#e4e0d7]">{c}</option>)}
+        </select>
+      )}
+    </div>
+  );
   
   if (!session) {
     return (
