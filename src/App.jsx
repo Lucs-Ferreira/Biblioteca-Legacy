@@ -1,14 +1,23 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import {
-  Box, Upload, FolderDown, Settings, Search, Plus, ExternalLink,
-  Trash2, Edit3, Eye, CheckCircle2, AlertTriangle, Folder,
-  HardDrive, ShieldCheck, RefreshCw, X, Check, FileArchive,
-  LogOut, FolderPlus, Tag, Calculator, Menu, Filter, ArrowRight,
-  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Share2,
-  Copy, Link2, Images, ListOrdered, CheckSquare, Square, ArrowUpDown,
-  FileWarning, Layers
+  Box, Upload, FolderDown, Settings, Search, Plus,
+  CheckCircle2, AlertTriangle, HardDrive, RefreshCw, X, FileArchive,
+  LogOut, Calculator, Menu, Filter, ChevronLeft, ChevronRight,
+  ChevronsLeft, ChevronsRight, Share2, Images, ListOrdered,
+  CheckSquare, Square, ArrowUpDown, FileWarning
 } from 'lucide-react';
+
+import {
+  GOOGLE_SCOPES,
+  BASE_CATEGORIES,
+  PRIORITY_WEIGHT,
+  formatBytes,
+  getModelImagePaths,
+  loadJSZip
+} from './utils/helpers';
+import CatalogModals, { ImageCarouselModalHeader } from './components/CatalogModals';
+import SecondaryTabs from './components/SecondaryTabs';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
@@ -17,56 +26,6 @@ const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
 const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null;
-
-const GOOGLE_SCOPES = 'https://www.googleapis.com/auth/drive email profile';
-
-const BASE_CATEGORIES = [
-  'Geral',
-  'Miniaturas & RPG',
-  'Peças Mecânicas',
-  'Utilidades Domésticas',
-  'Cosplay & Props',
-  'Organizadores',
-  'Articulados',
-  'Suportes & Cases'
-];
-
-const PRIORITY_WEIGHT = {
-  Alta: 3,
-  Normal: 2,
-  Baixa: 1
-};
-
-function formatBytes(bytes = 0) {
-  if (!bytes || bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-}
-
-function getModelImagePaths(model) {
-  if (!model) return [];
-  if (Array.isArray(model.image_paths) && model.image_paths.length > 0) {
-    return model.image_paths.filter(Boolean);
-  }
-  if (model.image_path) {
-    return [model.image_path];
-  }
-  return [];
-}
-
-async function loadJSZip() {
-  if (window.JSZip) return window.JSZip;
-  return new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
-    script.async = true;
-    script.onload = () => resolve(window.JSZip);
-    script.onerror = () => reject(new Error('Não foi possível carregar o compactador JSZip.'));
-    document.body.appendChild(script);
-  });
-}
 
 export default function App() {
   const [shareIdFromUrl] = useState(() => {
@@ -137,7 +96,6 @@ export default function App() {
   const [pathUrls, setPathUrls] = useState({});
   const [loadingData, setLoadingData] = useState(false);
 
-  // Estados de Ordenação, Ações em Lote e Verificação de Ghost Files
   const [sortBy, setSortBy] = useState('newest');
   const [bulkMode, setBulkMode] = useState(false);
   const [selectedModelIds, setSelectedModelIds] = useState([]);
@@ -239,7 +197,6 @@ export default function App() {
     return Array.from(new Set([...BASE_CATEGORIES, ...custom, ...fromModels]));
   }, [settings.custom_categories, models]);
 
-  // Modelos na Fila de Impressão ordenados por Prioridade (Alta -> Normal -> Baixa)
   const queuedModels = useMemo(() => {
     return models
       .filter((m) => m.in_print_queue)
@@ -250,7 +207,6 @@ export default function App() {
       });
   }, [models]);
 
-  // Contador de Ghost Files detectados
   const ghostCount = useMemo(() => {
     return models.filter((m) => driveStatusCheck[m.id] === 'missing').length;
   }, [models, driveStatusCheck]);
@@ -285,8 +241,7 @@ export default function App() {
     if (!modelsToLoad?.length) return;
     const allPaths = [];
     modelsToLoad.forEach((m) => {
-      const paths = getModelImagePaths(m);
-      paths.forEach((p) => allPaths.push(p));
+      getModelImagePaths(m).forEach((p) => allPaths.push(p));
     });
     await ensureSignedUrlsForPaths(allPaths);
   }, [ensureSignedUrlsForPaths]);
@@ -298,7 +253,6 @@ export default function App() {
 
   useEffect(() => {
     if (!shareIdFromUrl || !supabase) return;
-
     const fetchPublicSharedCatalog = async () => {
       setSharedLoading(true);
       setSharedError('');
@@ -309,14 +263,11 @@ export default function App() {
         if (error) throw error;
         setSharedCatalogData(data);
       } catch (err) {
-        setSharedError(
-          err.message || 'Este link compartilhado não existe ou foi desativado pelo proprietário.'
-        );
+        setSharedError(err.message || 'Este link compartilhado não existe ou foi desativado.');
       } finally {
         setSharedLoading(false);
       }
     };
-
     fetchPublicSharedCatalog();
   }, [shareIdFromUrl]);
 
@@ -536,9 +487,6 @@ export default function App() {
     }
   };
 
-  // ============================================================================
-  // FILA DE IMPRESSÃO (PRINT QUEUE)
-  // ============================================================================
   const handleTogglePrintQueue = async (model, e) => {
     if (e) e.stopPropagation();
     if (!supabase) return;
@@ -591,9 +539,6 @@ export default function App() {
       .eq('id', model.id);
   };
 
-  // ============================================================================
-  // AÇÕES EM LOTE (BULK ACTIONS)
-  // ============================================================================
   const toggleSelectModelForBulk = (modelId, e) => {
     if (e) e.stopPropagation();
     setSelectedModelIds((prev) =>
@@ -754,9 +699,6 @@ export default function App() {
     }
   };
 
-  // ============================================================================
-  // SINCRONIZAÇÃO REVERSA (VERIFICADOR DE GHOST FILES NO GOOGLE DRIVE)
-  // ============================================================================
   const handleScanGhostFiles = async () => {
     if (!googleConnected) {
       showToast('Vincule sua conta Google primeiro para verificar os arquivos no Drive.', 'error');
@@ -769,7 +711,6 @@ export default function App() {
     const statusMap = { ...driveStatusCheck };
 
     try {
-      // Verifica em lotes paralelos de 8 modelos por vez para ser super rápido
       const chunkSize = 8;
       for (let i = 0; i < models.length; i += chunkSize) {
         const chunk = models.slice(i, i + chunkSize);
@@ -888,9 +829,6 @@ export default function App() {
     showToast('Link copiado!');
   };
 
-  // ============================================================================
-  // FILTRAGEM + ORDENAÇÃO AVANÇADA + PAGINAÇÃO
-  // ============================================================================
   const activeModelsSource = useMemo(() => {
     let baseList = [];
 
@@ -920,24 +858,12 @@ export default function App() {
       });
     }
 
-    // Ordenação Avançada
     baseList.sort((a, b) => {
-      if (sortBy === 'oldest') {
-        return new Date(a.created_at || 0) - new Date(b.created_at || 0);
-      }
-      if (sortBy === 'name_asc') {
-        return (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' });
-      }
-      if (sortBy === 'name_desc') {
-        return (b.name || '').localeCompare(a.name || '', 'pt-BR', { sensitivity: 'base' });
-      }
-      if (sortBy === 'size_desc') {
-        return Number(b.drive_file_size || 0) - Number(a.drive_file_size || 0);
-      }
-      if (sortBy === 'size_asc') {
-        return Number(a.drive_file_size || 0) - Number(b.drive_file_size || 0);
-      }
-      // Padrão: newest (Mais recentes primeiro)
+      if (sortBy === 'oldest') return new Date(a.created_at || 0) - new Date(b.created_at || 0);
+      if (sortBy === 'name_asc') return (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' });
+      if (sortBy === 'name_desc') return (b.name || '').localeCompare(a.name || '', 'pt-BR', { sensitivity: 'base' });
+      if (sortBy === 'size_desc') return Number(b.drive_file_size || 0) - Number(a.drive_file_size || 0);
+      if (sortBy === 'size_asc') return Number(a.drive_file_size || 0) - Number(b.drive_file_size || 0);
       return new Date(b.created_at || 0) - new Date(a.created_at || 0);
     });
 
@@ -1308,28 +1234,6 @@ export default function App() {
     setAddingCategoryContext(null);
     setSavingCategory(false);
     showToast(`Categoria "${trimmed}" salva!`);
-  };
-
-  const handleRemoveCustomCategory = async (catToRemove) => {
-    const updatedCustom = (settings.custom_categories || []).filter((c) => c !== catToRemove);
-    setSettings((prev) => ({ ...prev, custom_categories: updatedCustom }));
-    if (session?.user) {
-      localStorage.setItem(`stl_cats_${session.user.id}`, JSON.stringify(updatedCustom));
-    }
-    if (supabase && session?.user) {
-      await supabase
-        .from('user_settings')
-        .upsert({
-          user_id: session.user.id,
-          root_folder_id: settings.root_folder_id,
-          root_folder_name: settings.root_folder_name,
-          organize_by_subfolders: settings.organize_by_subfolders,
-          max_upload_size_mb: settings.max_upload_size_mb,
-          custom_categories: updatedCustom,
-          updated_at: new Date().toISOString()
-        });
-    }
-    showToast(`Categoria "${catToRemove}" removida da lista.`);
   };
 
   const handleSupabaseAuth = async (e) => {
@@ -2082,95 +1986,6 @@ export default function App() {
     </div>
   );
 
-  const renderImageCarouselModalHeader = (model) => {
-    const paths = getModelImagePaths(model);
-    const total = paths.length;
-    const safeIdx = total > 0 ? Math.min(activeImageIndex, total - 1) : 0;
-    const currentUrl = total > 0 ? getSignedUrlForPath(paths[safeIdx]) : null;
-
-    return (
-      <div className="bg-[#000000] border-b border-[#1c1b19]">
-        <div className="aspect-video relative flex items-center justify-center overflow-hidden">
-          {currentUrl ? (
-            <>
-              <img
-                src={currentUrl}
-                alt={`${model.name} - Foto ${safeIdx + 1}`}
-                className="w-full h-full object-contain"
-              />
-              <button
-                type="button"
-                onClick={() => setLightboxUrl(currentUrl)}
-                className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-[#000000]/85 text-[#e4e0d7] text-xs flex items-center gap-1.5 border border-[#e4e0d7]/30 cursor-pointer hover:bg-[#141413]"
-              >
-                <Eye className="w-4 h-4" /> Ampliar ({safeIdx + 1}/{total})
-              </button>
-            </>
-          ) : (
-            <div className="text-[#5e5a52] text-xs flex flex-col items-center gap-1">
-              <Box className="w-10 h-10" />
-              <span>Sem imagem</span>
-            </div>
-          )}
-
-          {total > 1 && (
-            <>
-              <button
-                type="button"
-                onClick={() => setActiveImageIndex((prev) => (prev - 1 + total) % total)}
-                className="absolute left-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-[#000000]/80 hover:bg-[#e4e0d7] text-[#e4e0d7] hover:text-[#000000] border border-[#262522] cursor-pointer transition"
-                title="Foto Anterior"
-              >
-                <ChevronLeft className="w-5 h-5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveImageIndex((prev) => (prev + 1) % total)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-[#000000]/80 hover:bg-[#e4e0d7] text-[#e4e0d7] hover:text-[#000000] border border-[#262522] cursor-pointer transition"
-                title="Próxima Foto"
-              >
-                <ChevronRight className="w-5 h-5" />
-              </button>
-            </>
-          )}
-
-          <button
-            type="button"
-            onClick={() => setSelectedModel(null)}
-            className="absolute top-3 right-3 p-2 rounded-full bg-[#000000]/80 text-[#a39e93] hover:text-white cursor-pointer"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {total > 1 && (
-          <div className="px-4 py-2.5 bg-[#050505] border-t border-[#141413] flex items-center gap-2 overflow-x-auto">
-            {paths.map((p, idx) => {
-              const thumbUrl = getSignedUrlForPath(p);
-              const isSelected = idx === safeIdx;
-              return (
-                <button
-                  key={p}
-                  type="button"
-                  onClick={() => setActiveImageIndex(idx)}
-                  className={`w-16 h-12 rounded-lg overflow-hidden border-2 shrink-0 transition cursor-pointer ${
-                    isSelected ? 'border-[#c89d66] scale-105' : 'border-[#262522] opacity-60 hover:opacity-100'
-                  }`}
-                >
-                  {thumbUrl ? (
-                    <img src={thumbUrl} alt={`Miniatura ${idx + 1}`} className="w-full h-full object-cover" />
-                  ) : (
-                    <div className="w-full h-full bg-[#141413]" />
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    );
-  };
-
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     return (
       <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex items-center justify-center p-6">
@@ -2185,9 +2000,7 @@ export default function App() {
     );
   }
 
-  // ============================================================================
   // MODO VITRINE PÚBLICA (?share=UUID)
-  // ============================================================================
   if (shareIdFromUrl) {
     return (
       <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex flex-col">
@@ -2403,7 +2216,14 @@ export default function App() {
         {selectedModel && (
           <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
-              {renderImageCarouselModalHeader(selectedModel)}
+              <ImageCarouselModalHeader
+                model={selectedModel}
+                activeImageIndex={activeImageIndex}
+                setActiveImageIndex={setActiveImageIndex}
+                getSignedUrlForPath={getSignedUrlForPath}
+                setLightboxUrl={setLightboxUrl}
+                onClose={() => setSelectedModel(null)}
+              />
               <div className="p-5 sm:p-6 space-y-4">
                 <div>
                   <span className="px-2.5 py-1 rounded-md text-xs bg-[#e4e0d7]/15 text-[#e4e0d7]">
@@ -2503,8 +2323,7 @@ export default function App() {
               <Box className="w-4 h-4" /><span>Catálogo ({models.length})</span>
             </button>
             <button onClick={() => setActiveTab('fila')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'fila' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
-              <ListOrdered className="w-4 h-4" />
-              <span>Fila ({queuedModels.length})</span>
+              <ListOrdered className="w-4 h-4" /><span>Fila ({queuedModels.length})</span>
             </button>
             <button onClick={() => setActiveTab('upload')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'upload' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
               <Upload className="w-4 h-4" /><span>Enviar</span>
@@ -2524,8 +2343,7 @@ export default function App() {
               className="ml-1 px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 hover:bg-[#b94a48]/25 transition cursor-pointer"
               title="Sair da Conta"
             >
-              <LogOut className="w-4 h-4" />
-              <span>Sair</span>
+              <LogOut className="w-4 h-4" /><span>Sair</span>
             </button>
           </nav>
 
@@ -2597,7 +2415,6 @@ export default function App() {
       <main className="max-w-7xl mx-auto w-full px-3 sm:px-6 py-6 sm:py-8 flex-1">
         {activeTab === 'catalogo' && (
           <div className="space-y-5">
-            {/* Barra de Filtros, Ordenação, Lote e Sincronização Reversa */}
             <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5 space-y-4">
               <div className="flex flex-col lg:flex-row gap-3 items-stretch lg:items-center justify-between">
                 <div className="relative w-full lg:w-64 focus-within:lg:w-96 transition-all duration-300">
@@ -2614,7 +2431,6 @@ export default function App() {
                       type="button"
                       onClick={() => setSearchInput('')}
                       className="absolute right-3 top-1/2 -translate-y-1/2 text-[#8c877e] hover:text-[#e4e0d7] cursor-pointer"
-                      title="Limpar pesquisa"
                     >
                       <X className="w-4 h-4" />
                     </button>
@@ -2622,7 +2438,6 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2.5 justify-end">
-                  {/* Seletor de Categoria */}
                   <div className="flex items-center gap-1.5">
                     <Filter className="w-4 h-4 text-[#c89d66] shrink-0" />
                     <select
@@ -2637,7 +2452,6 @@ export default function App() {
                     </select>
                   </div>
 
-                  {/* Seletor de Ordenação Avançada */}
                   <div className="flex items-center gap-1.5">
                     <ArrowUpDown className="w-4 h-4 text-[#c89d66] shrink-0" />
                     <select
@@ -2654,7 +2468,6 @@ export default function App() {
                     </select>
                   </div>
 
-                  {/* Quantidade por Página */}
                   <div className="flex items-center gap-1.5">
                     <span className="text-xs text-[#8c877e]">Exibir:</span>
                     <select
@@ -2671,7 +2484,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Segunda linha de ferramentas: Seleção em Lote, Ghost Files e Compartilhamento */}
               <div className="pt-3 border-t border-[#1c1b19] flex flex-wrap items-center justify-between gap-2.5">
                 <div className="flex flex-wrap items-center gap-2">
                   <button
@@ -2705,7 +2517,6 @@ export default function App() {
                     disabled={scanningGhostFiles}
                     onClick={handleScanGhostFiles}
                     className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#000000] hover:bg-[#141413] text-[#a39e93] hover:text-[#e4e0d7] border border-[#262522] flex items-center gap-1.5 cursor-pointer transition"
-                    title="Verifica se todos os arquivos ZIP cadastrados ainda existem no Google Drive"
                   >
                     <FileWarning className={`w-3.5 h-3.5 text-[#c89d66] ${scanningGhostFiles ? 'animate-spin' : ''}`} />
                     <span>{scanningGhostFiles ? 'Verificando Drive...' : 'Verificar Arquivos no Drive'}</span>
@@ -2749,7 +2560,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* BARRA DE AÇÕES EM LOTE QUANDO HÁ ITENS SELECIONADOS */}
             {bulkMode && selectedModelIds.length > 0 && (
               <div className="bg-[#141311] border border-[#c89d66] rounded-2xl p-3.5 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-2xl sticky top-20 z-20">
                 <div className="flex items-center gap-2 text-xs sm:text-sm font-bold text-[#e4e0d7]">
@@ -2866,7 +2676,6 @@ export default function App() {
                             </div>
                           )}
 
-                          {/* Checkbox do Modo Lote ou Categoria */}
                           {bulkMode ? (
                             <button
                               type="button"
@@ -2885,11 +2694,9 @@ export default function App() {
                             </span>
                           )}
 
-                          {/* Botão Rápido da Fila de Impressão no Topo Direito */}
                           <button
                             type="button"
                             onClick={(e) => handleTogglePrintQueue(model, e)}
-                            title={model.in_print_queue ? 'Na Fila de Impressão (clique para remover)' : 'Adicionar à Fila de Impressão'}
                             className={`absolute top-2.5 right-2.5 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition cursor-pointer ${
                               model.in_print_queue
                                 ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
@@ -2900,7 +2707,6 @@ export default function App() {
                             <span>{model.in_print_queue ? 'Na Fila' : '+ Fila'}</span>
                           </button>
 
-                          {/* Alerta de Arquivo Ausente no Drive (Ghost File) */}
                           {isGhost && (
                             <span className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#b94a48] text-white flex items-center gap-1">
                               <AlertTriangle className="w-3 h-3" /> Ausente no Drive
@@ -2940,18 +2746,12 @@ export default function App() {
                   })}
                 </div>
 
-                {/* BARRA DE PAGINAÇÃO */}
                 <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
                   <div className="text-xs text-[#8c877e]">
                     Mostrando{' '}
-                    <strong className="text-[#e4e0d7]">
-                      {(safeCurrentPage - 1) * itemsPerPage + 1}
-                    </strong>{' '}
-                    a{' '}
-                    <strong className="text-[#e4e0d7]">
-                      {Math.min(safeCurrentPage * itemsPerPage, activeModelsSource.length)}
-                    </strong>{' '}
-                    de <strong className="text-[#e4e0d7]">{activeModelsSource.length}</strong> modelo(s)
+                    <strong className="text-[#e4e0d7]">{(safeCurrentPage - 1) * itemsPerPage + 1}</strong> a{' '}
+                    <strong className="text-[#e4e0d7]">{Math.min(safeCurrentPage * itemsPerPage, activeModelsSource.length)}</strong> de{' '}
+                    <strong className="text-[#e4e0d7]">{activeModelsSource.length}</strong> modelo(s)
                   </div>
 
                   <div className="flex items-center gap-1.5">
@@ -2960,7 +2760,6 @@ export default function App() {
                       disabled={safeCurrentPage === 1}
                       onClick={() => setCurrentPage(1)}
                       className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] disabled:opacity-35 disabled:pointer-events-none cursor-pointer transition"
-                      title="Primeira Página"
                     >
                       <ChevronsLeft className="w-4 h-4" />
                     </button>
@@ -2969,14 +2768,11 @@ export default function App() {
                       disabled={safeCurrentPage === 1}
                       onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                       className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] disabled:opacity-35 disabled:pointer-events-none cursor-pointer transition"
-                      title="Página Anterior"
                     >
                       <ChevronLeft className="w-4 h-4" />
                     </button>
 
-                    {pageNumbers[0] > 1 && (
-                      <span className="px-2 text-xs text-[#6e6a61]">...</span>
-                    )}
+                    {pageNumbers[0] > 1 && <span className="px-2 text-xs text-[#6e6a61]">...</span>}
 
                     {pageNumbers.map((num) => (
                       <button
@@ -2986,23 +2782,20 @@ export default function App() {
                         className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
                           num === safeCurrentPage
                             ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
-                            : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] hover:border-[#e4e0d7]/40'
+                            : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7]'
                         }`}
                       >
                         {num}
                       </button>
                     ))}
 
-                    {pageNumbers[pageNumbers.length - 1] < totalPages && (
-                      <span className="px-2 text-xs text-[#6e6a61]">...</span>
-                    )}
+                    {pageNumbers[pageNumbers.length - 1] < totalPages && <span className="px-2 text-xs text-[#6e6a61]">...</span>}
 
                     <button
                       type="button"
                       disabled={safeCurrentPage === totalPages}
                       onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
                       className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] disabled:opacity-35 disabled:pointer-events-none cursor-pointer transition"
-                      title="Próxima Página"
                     >
                       <ChevronRight className="w-4 h-4" />
                     </button>
@@ -3011,7 +2804,6 @@ export default function App() {
                       disabled={safeCurrentPage === totalPages}
                       onClick={() => setCurrentPage(totalPages)}
                       className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] disabled:opacity-35 disabled:pointer-events-none cursor-pointer transition"
-                      title="Última Página"
                     >
                       <ChevronsRight className="w-4 h-4" />
                     </button>
@@ -3022,1186 +2814,118 @@ export default function App() {
           </div>
         )}
 
-        {/* NOVA ABA: FILA DE IMPRESSÃO (PRINT QUEUE) */}
-        {activeTab === 'fila' && (
-          <div className="space-y-6 max-w-5xl mx-auto">
-            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <div className="p-2.5 rounded-xl bg-[#c89d66] text-[#000000]">
-                  <ListOrdered className="w-6 h-6" />
-                </div>
-                <div>
-                  <h2 className="text-lg font-bold text-[#e4e0d7]">Fila de Impressão ({queuedModels.length})</h2>
-                  <p className="text-xs text-[#8c877e]">
-                    Organize suas próximas impressões por prioridade e marque como concluídas após imprimir.
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActiveTab('catalogo')}
-                className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold cursor-pointer"
-              >
-                + Adicionar Mais do Catálogo
-              </button>
-            </div>
-
-            {queuedModels.length === 0 ? (
-              <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-12 text-center space-y-3">
-                <ListOrdered className="w-10 h-10 text-[#5e5a52] mx-auto" />
-                <p className="text-sm font-semibold text-[#e4e0d7]">Sua Fila de Impressão está vazia</p>
-                <p className="text-xs text-[#8c877e] max-w-md mx-auto">
-                  Clique no botão <strong>"+ Fila"</strong> no canto superior direito de qualquer card no Catálogo para planejar suas próximas impressões.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {queuedModels.map((model, index) => {
-                  const paths = getModelImagePaths(model);
-                  const coverUrl = getSignedUrlForPath(paths[0]);
-                  const prio = model.queue_priority || 'Normal';
-                  return (
-                    <div
-                      key={model.id}
-                      className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 hover:border-[#e4e0d7]/40 transition"
-                    >
-                      <div className="flex items-center gap-4">
-                        <div className="w-7 h-7 rounded-lg bg-[#141413] border border-[#262522] flex items-center justify-center text-xs font-bold text-[#c89d66] shrink-0">
-                          #{index + 1}
-                        </div>
-                        <div
-                          onClick={() => handleOpenDetails(model)}
-                          className="w-20 h-14 rounded-xl bg-[#000000] border border-[#262522] overflow-hidden shrink-0 flex items-center justify-center cursor-pointer"
-                        >
-                          {coverUrl ? (
-                            <img src={coverUrl} alt={model.name} className="w-full h-full object-cover" />
-                          ) : (
-                            <Box className="w-6 h-6 text-[#5e5a52]" />
-                          )}
-                        </div>
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <h3
-                              onClick={() => handleOpenDetails(model)}
-                              className="font-bold text-sm text-[#e4e0d7] hover:underline cursor-pointer"
-                            >
-                              {model.name}
-                            </h3>
-                            <span className="px-2 py-0.5 rounded text-[10px] bg-[#141413] text-[#a39e93] border border-[#262522]">
-                              {model.category}
-                            </span>
-                          </div>
-                          {model.notes && (
-                            <p className="text-xs text-[#c89d66]">Config: {model.notes}</p>
-                          )}
-                          <p className="text-[11px] text-[#8c877e]">{formatBytes(model.drive_file_size)}</p>
-                        </div>
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2.5 justify-end border-t sm:border-t-0 pt-3 sm:pt-0 border-[#1c1b19]">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-xs text-[#8c877e]">Prioridade:</span>
-                          <select
-                            value={prio}
-                            onChange={(e) => handleChangeQueuePriority(model, e.target.value)}
-                            className={`px-2.5 py-1.5 rounded-xl text-xs font-bold border cursor-pointer ${
-                              prio === 'Alta'
-                                ? 'bg-[#b94a48]/20 text-[#e89b99] border-[#b94a48]/40'
-                                : prio === 'Baixa'
-                                  ? 'bg-[#141413] text-[#8c877e] border-[#262522]'
-                                  : 'bg-[#c89d66]/20 text-[#c89d66] border-[#c89d66]/40'
-                            }`}
-                          >
-                            <option value="Alta" className="bg-[#0a0a0a] text-[#e4e0d7]">Alta</option>
-                            <option value="Normal" className="bg-[#0a0a0a] text-[#e4e0d7]">Normal</option>
-                            <option value="Baixa" className="bg-[#0a0a0a] text-[#e4e0d7]">Baixa</option>
-                          </select>
-                        </div>
-
-                        <a
-                          href={model.drive_file_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="px-3 py-1.5 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold inline-flex items-center gap-1.5"
-                        >
-                          <ExternalLink className="w-3.5 h-3.5 text-[#c89d66]" />
-                          <span>Baixar ZIP</span>
-                        </a>
-
-                        <button
-                          type="button"
-                          onClick={(e) => handleTogglePrintQueue(model, e)}
-                          className="px-3.5 py-1.5 bg-[#4d7c5b] hover:bg-[#3f684b] text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition"
-                        >
-                          <Check className="w-3.5 h-3.5" />
-                          <span>Concluir Impressão</span>
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
-
-        {activeTab === 'upload' && (
-          <div className="max-w-2xl mx-auto bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-6">
-            <div>
-              <h2 className="text-lg font-bold text-[#e4e0d7]">Enviar Novo Modelo STL (.ZIP)</h2>
-              <p className="text-xs text-[#8c877e] mt-1">O arquivo ZIP será salvo dentro da subpasta correspondente no Google Drive.</p>
-            </div>
-            {pendingRecovery && (
-              <div className="p-4 rounded-xl bg-[#c89d66]/10 border border-[#c89d66]/40 space-y-3">
-                <div className="flex items-center gap-2 text-[#c89d66] text-sm font-semibold"><AlertTriangle className="w-5 h-5 shrink-0" /><span>Upload concluído, mas o salvamento falhou!</span></div>
-                <button type="button" onClick={handleRetryMetadataSave} disabled={uploading} className="px-4 py-2 bg-[#c89d66] text-[#000000] font-bold rounded-lg text-xs cursor-pointer">Recuperar e Concluir Cadastro</button>
-              </div>
-            )}
-            <form onSubmit={handleUploadNewModel} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Nome do Modelo *</label>
-                  <input type="text" required value={uploadForm.name} onChange={(e) => setUploadForm({ ...uploadForm, name: e.target.value })} placeholder="Ex: Dragão" className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-                </div>
-                {renderCategorySelector(uploadForm.category, (val) => setUploadForm({ ...uploadForm, category: val }), 'upload')}
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-[#a39e93] mb-1">Descrição</label>
-                <textarea rows={2} value={uploadForm.description} onChange={(e) => setUploadForm({ ...uploadForm, description: e.target.value })} placeholder="Detalhes..." className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Tags (separadas por vírgula)</label>
-                  <input type="text" value={uploadForm.tags} onChange={(e) => setUploadForm({ ...uploadForm, tags: e.target.value })} placeholder="rpg, stl" className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Observações de Impressão</label>
-                  <input type="text" value={uploadForm.notes} onChange={(e) => setUploadForm({ ...uploadForm, notes: e.target.value })} placeholder="PLA 205°C" className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-                </div>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-                <div className="p-4 rounded-xl bg-[#000000] border border-dashed border-[#383632] space-y-2">
-                  <label className="block text-xs font-semibold text-[#e4e0d7]">1. Arquivo ZIP *</label>
-                  <input type="file" accept=".zip,application/zip" required onChange={(e) => { const file = e.target.files?.[0] || null; setUploadForm((prev) => ({ ...prev, zipFile: file, name: prev.name || (file ? file.name.replace(/\.zip$/i, '') : '') })); }} className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#e4e0d7] file:text-[#000000] file:font-semibold" />
-                  {uploadForm.zipFile && <p className="text-[11px] text-[#70a37f] truncate">{uploadForm.zipFile.name}</p>}
-                </div>
-                <div className="p-4 rounded-xl bg-[#000000] border border-dashed border-[#383632] space-y-2">
-                  <label className="block text-xs font-semibold text-[#c89d66]">2. Imagens de Referência (Pode selecionar várias)</label>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    onChange={(e) => {
-                      const files = Array.from(e.target.files || []);
-                      setUploadForm((prev) => ({ ...prev, imageFiles: [...prev.imageFiles, ...files] }));
-                    }}
-                    className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]"
-                  />
-                  {uploadForm.imageFiles.length > 0 && (
-                    <div className="space-y-1 pt-1">
-                      <p className="text-[11px] text-[#70a37f] font-semibold">{uploadForm.imageFiles.length} imagem(ns) selecionada(s):</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {uploadForm.imageFiles.map((img, i) => (
-                          <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#141413] border border-[#262522] text-[10px] text-[#e4e0d7]">
-                            <span className="truncate max-w-[110px]">{img.name}</span>
-                            <button
-                              type="button"
-                              onClick={() => setUploadForm((prev) => ({
-                                ...prev,
-                                imageFiles: prev.imageFiles.filter((_, idx) => idx !== i)
-                              }))}
-                              className="text-[#d96b68] hover:text-white cursor-pointer"
-                            >
-                              <X className="w-3 h-3" />
-                            </button>
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-              {uploading && <div className="p-3 rounded-xl bg-[#141413] border border-[#e4e0d7]/30 flex items-center gap-3 text-xs text-[#e4e0d7]"><RefreshCw className="w-4 h-4 animate-spin shrink-0" /><span>{uploadStep || 'Processando...'}</span></div>}
-              <div className="flex justify-end pt-2">
-                <button type="submit" disabled={uploading} className="px-6 py-2.5 bg-[#e4e0d7] hover:bg-[#d5d0c5] disabled:opacity-50 text-[#000000] font-bold rounded-xl text-sm transition cursor-pointer">
-                  {uploading ? 'Enviando...' : 'Enviar para o Drive e Catalogar'}
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-
-        {/* ABA IMPORTAR */}
-        {activeTab === 'importar' && (
-          <div className="space-y-6">
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
-              <div className="space-y-1">
-                <h2 className="text-base sm:text-lg font-bold text-[#e4e0d7]">
-                  Fila de Importação (<code className="text-[#c89d66]">importações/Aguardando</code>)
-                </h2>
-                <p className="text-xs text-[#8c877e]">
-                  Coloque suas pastas de modelos dentro de <strong className="text-[#e4e0d7]">importações/Aguardando</strong>. Ao cadastrar, o sistema compacta a pasta em <strong>.ZIP</strong>, salva na categoria escolhida e move a pasta original para <strong className="text-[#e4e0d7]">importações/Importadas</strong>.
-                </p>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2 shrink-0">
-                {importPipelineIds.aguardandoId && (
-                  <a
-                    href={`https://drive.google.com/drive/folders/${importPipelineIds.aguardandoId}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="px-3.5 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold inline-flex items-center gap-1.5"
-                  >
-                    <Folder className="w-3.5 h-3.5 text-[#c89d66]" />
-                    <span>Abrir "Aguardando" no Drive</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
-                )}
-                {importPipelineIds.importadasId && (
-                  <a
-                    href={`https://drive.google.com/drive/folders/${importPipelineIds.importadasId}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="px-3.5 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#a39e93] border border-[#262522] rounded-xl text-xs font-semibold inline-flex items-center gap-1.5"
-                  >
-                    <span>Ver "Importadas"</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
-                )}
-                <button
-                  onClick={fetchAwaitingImports}
-                  disabled={loadingDriveZips}
-                  className="px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <RefreshCw className={`w-4 h-4 ${loadingDriveZips ? 'animate-spin' : ''}`} />
-                  <span>Atualizar Fila</span>
-                </button>
-              </div>
-            </div>
-
-            {!settings.root_folder_id ? (
-              <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 text-center text-sm text-[#8c877e]">
-                Conecte o Google e selecione a pasta raiz.
-              </div>
-            ) : loadingDriveZips ? (
-              <div className="py-16 text-center text-[#a39e93] flex flex-col items-center gap-2">
-                <RefreshCw className="w-6 h-6 animate-spin text-[#e4e0d7]" />
-                <span className="text-xs">Verificando pastas em importações/Aguardando...</span>
-              </div>
-            ) : awaitingItems.length === 0 ? (
-              <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-8 text-center space-y-3">
-                <Folder className="w-10 h-10 text-[#5e5a52] mx-auto" />
-                <p className="text-sm text-[#e4e0d7] font-semibold">Nenhuma pasta aguardando importação</p>
-                <p className="text-xs text-[#8c877e] max-w-md mx-auto">
-                  Clique em <strong>"Abrir Aguardando no Drive"</strong> acima, solte suas pastas com arquivos STL lá dentro e clique em <strong>Atualizar Fila</strong>.
-                </p>
-              </div>
-            ) : (
-              <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl overflow-x-auto">
-                <table className="w-full text-left border-collapse text-sm min-w-[640px]">
-                  <thead>
-                    <tr className="border-b border-[#262522] text-xs text-[#8c877e] bg-[#000000]">
-                      <th className="py-3.5 px-4">Pasta / Item em Aguardando</th>
-                      <th className="py-3.5 px-4">Tipo</th>
-                      <th className="py-3.5 px-4">Fluxo Automático</th>
-                      <th className="py-3.5 px-4 text-right">Ação</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#1c1b19]">
-                    {awaitingItems.map((item) => {
-                      const isFolder = item.mimeType === 'application/vnd.google-apps.folder';
-                      return (
-                        <tr key={item.id} className="hover:bg-[#121211]">
-                          <td className="py-3.5 px-4 font-medium text-[#e4e0d7] flex items-center gap-2.5">
-                            {isFolder ? (
-                              <Folder className="w-4 h-4 text-[#c89d66] shrink-0" />
-                            ) : (
-                              <FileArchive className="w-4 h-4 text-[#e4e0d7] shrink-0" />
-                            )}
-                            <span className="truncate max-w-xs">{item.name}</span>
-                          </td>
-                          <td className="py-3.5 px-4 text-xs text-[#a39e93]">
-                            <span className="px-2 py-0.5 rounded bg-[#141413] border border-[#262522]">
-                              {isFolder ? 'Pasta de Arquivos' : `Arquivo (${formatBytes(item.size)})`}
-                            </span>
-                          </td>
-                          <td className="py-3.5 px-4 text-xs text-[#8c877e]">
-                            <span className="inline-flex items-center gap-1">
-                              Compactar .ZIP <ArrowRight className="w-3 h-3 text-[#c89d66]" /> Salvar na Categoria <ArrowRight className="w-3 h-3 text-[#c89d66]" /> Mover p/ Importadas
-                            </span>
-                          </td>
-                          <td className="py-3.5 px-4 text-right">
-                            <button
-                              onClick={() => {
-                                setImportingFile(item);
-                                setImportForm({
-                                  name: item.name.replace(/\.zip$/i, ''),
-                                  description: '',
-                                  category: 'Geral',
-                                  tags: '',
-                                  notes: '',
-                                  imageFiles: []
-                                });
-                              }}
-                              className="px-3.5 py-1.5 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-lg text-xs font-bold cursor-pointer transition"
-                            >
-                              Cadastrar e Compactar
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* CALCULADORA DE GASTOS */}
-        {activeTab === 'calculadora' && (
-          <div className="space-y-6 max-w-4xl mx-auto">
-            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-5 sm:p-6 space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-xl bg-[#e4e0d7] text-[#000000]"><Calculator className="w-6 h-6" /></div>
-                  <div>
-                    <h2 className="text-lg font-bold text-[#e4e0d7]">Calculadora de Gastos e Precificação</h2>
-                    <p className="text-xs text-[#8c877e]">Calcule o custo exato de produção e defina seu preço de venda com lucro.</p>
-                  </div>
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={() => setNewMaterialModal(true)} className="px-3.5 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center gap-1.5 cursor-pointer">
-                    <Plus className="w-3.5 h-3.5 text-[#c89d66]" /><span>Novo Material</span>
-                  </button>
-                  <button onClick={() => setNewPrinterModal(true)} className="px-3.5 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center gap-1.5 cursor-pointer">
-                    <Plus className="w-3.5 h-3.5 text-[#c89d66]" /><span>Nova Impressora</span>
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pt-4 border-t border-[#1c1b19]">
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Impressora</label>
-                  <select value={calcForm.printerId} onChange={(e) => setCalcForm({ ...calcForm, printerId: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]">
-                    {printers.length === 0 && <option value="">Nenhuma impressora cadastrada</option>}
-                    {printers.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.power_watts}W)</option>)}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Material (Filamento / Resina)</label>
-                  <select value={calcForm.materialId} onChange={(e) => setCalcForm({ ...calcForm, materialId: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]">
-                    {materials.length === 0 && <option value="">Nenhum material cadastrado</option>}
-                    {materials.map((m) => <option key={m.id} value={m.id}>{m.type}: {m.name} ({m.color}) - R$ {m.price_per_unit}/kg</option>)}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Peso da Peça (gramas / ml)</label>
-                  <input type="number" min={1} value={calcForm.weightGrams} onChange={(e) => setCalcForm({ ...calcForm, weightGrams: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Tempo de Impressão (Horas)</label>
-                  <input type="number" step="0.1" min={0.1} value={calcForm.printHours} onChange={(e) => setCalcForm({ ...calcForm, printHours: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Taxa de Falha / Desperdício (%)</label>
-                  <input type="number" min={0} value={calcForm.failureRate} onChange={(e) => setCalcForm({ ...calcForm, failureRate: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Mão de Obra (Horas de Dedicação)</label>
-                  <input type="number" step="0.1" min={0} value={calcForm.laborHours} onChange={(e) => setCalcForm({ ...calcForm, laborHours: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-                </div>
-              </div>
-
-              <div className="flex flex-wrap gap-6 pt-3 border-t border-[#1c1b19]">
-                <label className="flex items-center gap-2 text-xs text-[#e4e0d7] cursor-pointer">
-                  <input type="checkbox" checked={calcForm.washed} onChange={(e) => setCalcForm({ ...calcForm, washed: e.target.checked })} className="w-4 h-4 accent-[#e4e0d7]" />
-                  <span>Lavagem Realizada (Álcool / Insumos)</span>
-                </label>
-                <label className="flex items-center gap-2 text-xs text-[#e4e0d7] cursor-pointer">
-                  <input type="checkbox" checked={calcForm.painted} onChange={(e) => setCalcForm({ ...calcForm, painted: e.target.checked })} className="w-4 h-4 accent-[#e4e0d7]" />
-                  <span>Pintura / Primer / Acabamento Especial</span>
-                </label>
-              </div>
-
-              <div className="pt-3 border-t border-[#1c1b19] flex items-center justify-between gap-4">
-                <div>
-                  <p className="text-xs font-semibold text-[#e4e0d7]">Margem de Lucro Desejada (Markup %)</p>
-                  <p className="text-[11px] text-[#8c877e]">Percentual de lucro aplicado sobre o custo total de produção.</p>
-                </div>
-                <input type="number" min={0} value={calcForm.profitMarginPct} onChange={(e) => setCalcForm({ ...calcForm, profitMarginPct: e.target.value })} className="w-28 px-3 py-1.5 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7] text-right" />
-              </div>
-            </div>
-
-            <div className="bg-[#0a0a0a] border border-[#e4e0d7]/30 rounded-2xl p-6 space-y-5 shadow-2xl">
-              <h3 className="font-bold text-[#e4e0d7] text-base border-b border-[#1c1b19] pb-3">Detalhamento de Custos e Sugestão de Venda</h3>
-
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
-                <div className="p-3.5 rounded-xl bg-[#000000] border border-[#262522]">
-                  <span className="text-[#8c877e] block">Matéria-Prima</span>
-                  <strong className="text-white text-sm mt-1 block">R$ {calculationResults.materialCost.toFixed(2)}</strong>
-                  <span className="text-[10px] text-[#6e6a61]">({calculationResults.effectiveWeightG.toFixed(1)}g c/ falha)</span>
-                </div>
-                <div className="p-3.5 rounded-xl bg-[#000000] border border-[#262522]">
-                  <span className="text-[#8c877e] block">Energia Elétrica</span>
-                  <strong className="text-white text-sm mt-1 block">R$ {calculationResults.energyCost.toFixed(2)}</strong>
-                  <span className="text-[10px] text-[#6e6a61]">(R$ {settings.energy_cost_kwh}/kWh)</span>
-                </div>
-                <div className="p-3.5 rounded-xl bg-[#000000] border border-[#262522]">
-                  <span className="text-[#8c877e] block">Depreciação Máquina</span>
-                  <strong className="text-white text-sm mt-1 block">R$ {calculationResults.depreciationCost.toFixed(2)}</strong>
-                  <span className="text-[10px] text-[#6e6a61]">Desgaste hora/máquina</span>
-                </div>
-                <div className="p-3.5 rounded-xl bg-[#000000] border border-[#262522]">
-                  <span className="text-[#8c877e] block">Pós-Proc. & Mão de Obra</span>
-                  <strong className="text-white text-sm mt-1 block">R$ {(calculationResults.postProcCost + calculationResults.laborCost).toFixed(2)}</strong>
-                  <span className="text-[10px] text-[#6e6a61]">Insumos + Horas de bancada</span>
-                </div>
-              </div>
-
-              <div className="p-5 rounded-2xl bg-[#121211] border border-[#c89d66]/40 flex flex-col sm:flex-row items-center justify-between gap-4">
-                <div className="space-y-1 text-center sm:text-left">
-                  <span className="text-xs text-[#a39e93] block">Custo Total de Produção: <strong className="text-white">R$ {calculationResults.totalCost.toFixed(2)}</strong></span>
-                  <span className="text-xs text-[#70a37f] block">Lucro Líquido Estimado ({calcForm.profitMarginPct}%): <strong>R$ {calculationResults.netProfit.toFixed(2)}</strong></span>
-                </div>
-                <div className="text-center sm:text-right">
-                  <span className="text-xs text-[#c89d66] font-semibold uppercase tracking-wider block">Preço Sugerido de Venda</span>
-                  <span className="text-2xl sm:text-3xl font-black text-[#e4e0d7]">R$ {calculationResults.suggestedPrice.toFixed(2)}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'configuracoes' && (
-          <div className="max-w-3xl mx-auto space-y-6">
-            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <HardDrive className="w-6 h-6 text-[#e4e0d7] shrink-0" />
-                  <div>
-                    <h3 className="font-bold text-[#e4e0d7] text-base">Google Drive (Armazenamento Principal)</h3>
-                    <p className="text-xs text-[#8c877e]">Conexão definitiva via Refresh Token</p>
-                  </div>
-                </div>
-                <span className={`px-3 py-1 rounded-full text-xs font-semibold ${googleConnected ? 'bg-[#4d7c5b]/15 text-[#70a37f] border border-[#4d7c5b]/30' : 'bg-[#c89d66]/15 text-[#c89d66]'}`}>
-                  {googleConnected ? `Vinculado Definitivo ${googleUserEmail ? `(${googleUserEmail})` : ''}` : 'Não Vinculado'}
-                </span>
-              </div>
-
-              <div className="p-4 rounded-xl bg-[#000000] border border-[#262522] space-y-2 text-xs">
-                <div className="flex flex-col sm:flex-row sm:justify-between gap-1">
-                  <span className="text-[#8c877e]">Pasta Raiz:</span>
-                  <span className="font-semibold text-[#e4e0d7] break-all">{settings.root_folder_name || 'Nenhuma'}</span>
-                </div>
-                <div className="flex flex-col sm:flex-row sm:justify-between gap-1">
-                  <span className="text-[#8c877e]">ID da Pasta Raiz:</span>
-                  <span className="font-mono text-[#c89d66] break-all">{settings.root_folder_id || '—'}</span>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap gap-2.5">
-                {!googleConnected ? (
-                  <button onClick={handleConnectGoogle} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">
-                    Vincular Conta Google (1 Única Vez)
-                  </button>
-                ) : (
-                  <>
-                    <button onClick={() => openFolderPicker()} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">
-                      Selecionar Outra Pasta Raiz
-                    </button>
-                    {settings.root_folder_id && (
-                      <button
-                        type="button"
-                        disabled={syncingCategoryFolders}
-                        onClick={() => handleSyncAllCategorySubfolders(settings.root_folder_id, false)}
-                        className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center gap-2 cursor-pointer"
-                      >
-                        <FolderPlus className={`w-4 h-4 text-[#c89d66] ${syncingCategoryFolders ? 'animate-spin' : ''}`} />
-                        <span>{syncingCategoryFolders ? 'Sincronizando...' : 'Sincronizar Subpastas no Drive'}</span>
-                      </button>
-                    )}
-                    {settings.root_folder_id && (
-                      <a href={`https://drive.google.com/drive/folders/${settings.root_folder_id}`} target="_blank" rel="noreferrer" className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold inline-flex items-center gap-1.5">
-                        <span>Abrir Pasta Raiz no Drive</span><ExternalLink className="w-3.5 h-3.5" />
-                      </a>
-                    )}
-                    <button onClick={handleDisconnectGoogle} className="px-4 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs font-semibold cursor-pointer">
-                      Desvincular Google
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-
-            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-4">
-              <h3 className="font-bold text-[#e4e0d7] text-base">Parâmetros Padrão da Calculadora</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Custo da Energia (R$/kWh)</label>
-                  <input type="number" step="0.01" value={settings.energy_cost_kwh} onChange={(e) => handleSaveGeneralSettings({ energy_cost_kwh: Number(e.target.value) })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Taxa de Mão de Obra (R$/hora)</label>
-                  <input type="number" step="0.50" value={settings.labor_hourly_rate} onChange={(e) => handleSaveGeneralSettings({ labor_hourly_rate: Number(e.target.value) })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Taxa de Falha Padrão (%)</label>
-                  <input type="number" value={settings.default_failure_rate} onChange={(e) => handleSaveGeneralSettings({ default_failure_rate: Number(e.target.value) })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Adicional Pós-Processamento (%)</label>
-                  <input type="number" value={settings.default_post_processing_pct} onChange={(e) => handleSaveGeneralSettings({ default_post_processing_pct: Number(e.target.value) })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-4">
-              <div className="flex justify-between items-center">
-                <h3 className="font-bold text-[#e4e0d7] text-base">Materiais Cadastrados ({materials.length})</h3>
-                <button onClick={() => setNewMaterialModal(true)} className="px-3 py-1.5 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">+ Adicionar Material</button>
-              </div>
-              <div className="space-y-2">
-                {materials.map((m) => (
-                  <div key={m.id} className="flex justify-between items-center p-3 rounded-xl bg-[#000000] border border-[#262522] text-xs">
-                    <div><strong className="text-white">{m.type}: {m.name}</strong> ({m.color}) &bull; <span className="text-[#c89d66]">R$ {m.price_per_unit}/kg</span></div>
-                    <button onClick={() => handleDeleteMaterial(m.id)} className="text-[#b94a48] hover:underline cursor-pointer">Excluir</button>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-6 space-y-4">
-              <div className="flex justify-between items-center">
-                <h3 className="font-bold text-[#e4e0d7] text-base">Impressoras Cadastradas ({printers.length})</h3>
-                <button onClick={() => setNewPrinterModal(true)} className="px-3 py-1.5 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">+ Adicionar Impressora</button>
-              </div>
-              <div className="space-y-2">
-                {printers.map((p) => (
-                  <div key={p.id} className="flex justify-between items-center p-3 rounded-xl bg-[#000000] border border-[#262522] text-xs">
-                    <div><strong className="text-white">{p.name}</strong> ({p.power_watts}W) &bull; Valor: R$ {p.printer_value} &bull; Vida Útil: {p.lifespan_hours}h</div>
-                    <button onClick={() => handleDeletePrinter(p.id)} className="text-[#b94a48] hover:underline cursor-pointer">Excluir</button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
+        {/* ABAS SECUNDÁRIAS MODULARIZADAS */}
+        <SecondaryTabs
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          queuedModels={queuedModels}
+          getSignedUrlForPath={getSignedUrlForPath}
+          handleOpenDetails={handleOpenDetails}
+          handleChangeQueuePriority={handleChangeQueuePriority}
+          handleTogglePrintQueue={handleTogglePrintQueue}
+          pendingRecovery={pendingRecovery}
+          handleRetryMetadataSave={handleRetryMetadataSave}
+          uploading={uploading}
+          uploadStep={uploadStep}
+          handleUploadNewModel={handleUploadNewModel}
+          uploadForm={uploadForm}
+          setUploadForm={setUploadForm}
+          renderCategorySelector={renderCategorySelector}
+          importPipelineIds={importPipelineIds}
+          fetchAwaitingImports={fetchAwaitingImports}
+          loadingDriveZips={loadingDriveZips}
+          settings={settings}
+          awaitingItems={awaitingItems}
+          setImportingFile={setImportingFile}
+          setImportForm={setImportForm}
+          setNewMaterialModal={setNewMaterialModal}
+          setNewPrinterModal={setNewPrinterModal}
+          calcForm={calcForm}
+          setCalcForm={setCalcForm}
+          printers={printers}
+          materials={materials}
+          calculationResults={calculationResults}
+          googleConnected={googleConnected}
+          googleUserEmail={googleUserEmail}
+          handleConnectGoogle={handleConnectGoogle}
+          openFolderPicker={openFolderPicker}
+          syncingCategoryFolders={syncingCategoryFolders}
+          handleSyncAllCategorySubfolders={handleSyncAllCategorySubfolders}
+          handleDisconnectGoogle={handleDisconnectGoogle}
+          handleSaveGeneralSettings={handleSaveGeneralSettings}
+          handleDeleteMaterial={handleDeleteMaterial}
+          handleDeletePrinter={handleDeletePrinter}
+        />
       </main>
 
-      {/* MODAL MUDAR CATEGORIA EM LOTE */}
-      {bulkCategoryModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
-          <form onSubmit={handleConfirmBulkCategoryChange} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-md w-full p-6 space-y-4">
-            <h3 className="font-bold text-[#e4e0d7]">
-              Mover {selectedModelIds.length} Modelo(s) de Categoria
-            </h3>
-            <p className="text-xs text-[#8c877e]">
-              Os registros selecionados serão atualizados e seus respectivos arquivos ZIP serão movidos para a subpasta correspondente no Google Drive.
-            </p>
-            {renderCategorySelector(bulkTargetCategory, (val) => setBulkTargetCategory(val), 'bulk')}
-            {uploading && (
-              <div className="p-2.5 rounded-xl bg-[#141413] text-xs text-[#e4e0d7] flex items-center gap-2">
-                <RefreshCw className="w-4 h-4 animate-spin" />
-                <span>{uploadStep || 'Movendo modelos...'}</span>
-              </div>
-            )}
-            <div className="flex justify-end gap-2 pt-2">
-              <button type="button" disabled={uploading} onClick={() => setBulkCategoryModalOpen(false)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">
-                Cancelar
-              </button>
-              <button type="submit" disabled={uploading} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">
-                Confirmar Mudança
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* MODAL EXCLUIR EM LOTE */}
-      {bulkDeleteModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
-          <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-md w-full p-6 space-y-4">
-            <h3 className="font-bold text-[#e4e0d7]">
-              Excluir {selectedModelIds.length} modelo(s) selecionado(s)?
-            </h3>
-            <label className="flex items-start gap-2.5 p-3 rounded-xl bg-[#b94a48]/15 border border-[#b94a48]/30 text-xs text-[#e89b99] cursor-pointer">
-              <input
-                type="checkbox"
-                checked={bulkDeleteAlsoDrive}
-                onChange={(e) => setBulkDeleteAlsoDrive(e.target.checked)}
-                className="mt-0.5 accent-[#b94a48]"
-              />
-              <span>Excluir também os arquivos ZIP correspondentes do Google Drive.</span>
-            </label>
-            {uploading && (
-              <div className="p-2.5 rounded-xl bg-[#141413] text-xs text-[#e4e0d7] flex items-center gap-2">
-                <RefreshCw className="w-4 h-4 animate-spin" />
-                <span>{uploadStep || 'Excluindo em lote...'}</span>
-              </div>
-            )}
-            <div className="flex justify-end gap-2 pt-2">
-              <button type="button" disabled={uploading} onClick={() => setBulkDeleteModalOpen(false)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">
-                Cancelar
-              </button>
-              <button type="button" disabled={uploading} onClick={handleConfirmBulkDelete} className="px-4 py-2 bg-[#b94a48] text-white rounded-xl text-xs font-bold cursor-pointer">
-                Confirmar Exclusão
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL PARA CRIAR E GERENCIAR LINKS COMPARTILHADOS */}
-      {shareModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 overflow-y-auto">
-          <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-xl w-full p-6 space-y-5 my-auto max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-start">
-              <div>
-                <h3 className="font-bold text-[#e4e0d7] text-base flex items-center gap-2">
-                  <Share2 className="w-5 h-5 text-[#c89d66]" />
-                  <span>Compartilhar Catálogo (Somente Visualização)</span>
-                </h3>
-                <p className="text-xs text-[#8c877e] mt-1">
-                  A pessoa que receber o link verá <strong>apenas</strong> os modelos e fotos que corresponderem ao filtro abaixo, sem precisar logar.
-                </p>
-              </div>
-              <button onClick={() => setShareModalOpen(false)} className="text-[#8c877e] hover:text-white cursor-pointer">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateSharedLink} className="space-y-4 p-4 rounded-xl bg-[#000000] border border-[#262522]">
-              <div>
-                <label className="block text-xs font-medium text-[#a39e93] mb-1">Título da Vitrine</label>
-                <input
-                  type="text"
-                  required
-                  value={shareForm.title}
-                  onChange={(e) => setShareForm({ ...shareForm, title: e.target.value })}
-                  placeholder="Ex: Catálogo de Miniaturas RPG"
-                  className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Travar na Categoria:</label>
-                  <select
-                    value={shareForm.category_filter}
-                    onChange={(e) => setShareForm({ ...shareForm, category_filter: e.target.value })}
-                    className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-                  >
-                    <option value="Todas">Todas as Categorias</option>
-                    {allCategories.map((cat) => (
-                      <option key={cat} value={cat}>{cat}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Travar por Termo de Busca (Opcional):</label>
-                  <input
-                    type="text"
-                    value={shareForm.search_filter}
-                    onChange={(e) => setShareForm({ ...shareForm, search_filter: e.target.value })}
-                    placeholder="Ex: dragao, suporte..."
-                    className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-[#a39e93] mb-1">Travar por Tags específicas (separadas por vírgula - Opcional):</label>
-                <input
-                  type="text"
-                  value={shareForm.tags_input}
-                  onChange={(e) => setShareForm({ ...shareForm, tags_input: e.target.value })}
-                  placeholder="Ex: rpg, articulado"
-                  className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-                />
-              </div>
-
-              <div className="flex justify-end pt-1">
-                <button
-                  type="submit"
-                  disabled={creatingShareLink}
-                  className="px-4 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Link2 className="w-4 h-4" />
-                  <span>{creatingShareLink ? 'Gerando Link...' : 'Gerar e Copiar Link'}</span>
-                </button>
-              </div>
-            </form>
-
-            <div className="space-y-2.5">
-              <h4 className="text-xs font-semibold text-[#a39e93] uppercase tracking-wider">
-                Links Compartilhados Criados ({sharedLinks.length})
-              </h4>
-              {sharedLinks.length === 0 ? (
-                <p className="text-xs text-[#6e6a61] py-3 text-center">Nenhum link compartilhado gerado ainda.</p>
-              ) : (
-                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
-                  {sharedLinks.map((link) => (
-                    <div key={link.id} className="p-3 rounded-xl bg-[#000000] border border-[#262522] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-                      <div className="space-y-0.5 truncate">
-                        <strong className="text-[#e4e0d7] block truncate">{link.title}</strong>
-                        <span className="text-[11px] text-[#8c877e]">
-                          Categoria: <strong className="text-[#c89d66]">{link.category_filter}</strong>
-                          {link.search_filter ? ` • Busca: "${link.search_filter}"` : ''}
-                          {link.tags_filter?.length > 0 ? ` • Tags: ${link.tags_filter.join(', ')}` : ''}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => copyShareUrlToClipboard(link.id)}
-                          className="px-2.5 py-1.5 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-lg flex items-center gap-1 cursor-pointer"
-                        >
-                          <Copy className="w-3.5 h-3.5" /> Copiar
-                        </button>
-                        <a
-                          href={`/?share=${link.id}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="px-2.5 py-1.5 bg-[#141413] hover:bg-[#1f1e1c] text-[#c89d66] border border-[#262522] rounded-lg flex items-center gap-1"
-                        >
-                          <ExternalLink className="w-3.5 h-3.5" /> Testar
-                        </a>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteSharedLink(link.id)}
-                          className="p-1.5 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-lg cursor-pointer"
-                          title="Revogar Link"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL NOVO MATERIAL */}
-      {newMaterialModal && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
-          <form onSubmit={handleSaveMaterial} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-md w-full p-6 space-y-4">
-            <h3 className="font-bold text-[#e4e0d7]">Cadastrar Novo Material</h3>
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Tipo</label>
-              <select value={matForm.type} onChange={(e) => setMatForm({ ...matForm, type: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]">
-                <option value="Filamento">Filamento</option>
-                <option value="Resina">Resina</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Nome / Marca</label>
-              <input type="text" required value={matForm.name} onChange={(e) => setMatForm({ ...matForm, name: e.target.value })} placeholder="Ex: PLA Voolt3D" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-            </div>
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Cor</label>
-              <input type="text" required value={matForm.color} onChange={(e) => setMatForm({ ...matForm, color: e.target.value })} placeholder="Ex: Preto" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-            </div>
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Preço por Kg / Litro (R$)</label>
-              <input type="number" step="0.01" required value={matForm.price_per_unit} onChange={(e) => setMatForm({ ...matForm, price_per_unit: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-            </div>
-            <div className="flex justify-end gap-2 pt-2">
-              <button type="button" onClick={() => setNewMaterialModal(false)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
-              <button type="submit" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">Salvar Material</button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* MODAL NOVA IMPRESSORA */}
-      {newPrinterModal && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
-          <form onSubmit={handleSavePrinter} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-md w-full p-6 space-y-4">
-            <h3 className="font-bold text-[#e4e0d7]">Cadastrar Nova Impressora</h3>
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Nome do Modelo</label>
-              <input type="text" required value={printForm.name} onChange={(e) => setPrintForm({ ...printForm, name: e.target.value })} placeholder="Ex: Bambu Lab X1C" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-            </div>
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Consumo Energético (Watts)</label>
-              <input type="number" required value={printForm.power_watts} onChange={(e) => setPrintForm({ ...printForm, power_watts: e.target.value })} placeholder="Ex: 350" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-            </div>
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Valor de Compra (R$)</label>
-              <input type="number" required value={printForm.printer_value} onChange={(e) => setPrintForm({ ...printForm, printer_value: e.target.value })} placeholder="Ex: 5000" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-            </div>
-            <div>
-              <label className="block text-xs text-[#a39e93] mb-1">Vida Útil (Horas)</label>
-              <input type="number" required value={printForm.lifespan_hours} onChange={(e) => setPrintForm({ ...printForm, lifespan_hours: e.target.value })} placeholder="Ex: 5000" className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-            </div>
-            <div className="flex justify-end gap-2 pt-2">
-              <button type="button" onClick={() => setNewPrinterModal(false)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
-              <button type="submit" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">Salvar Impressora</button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* MODAL DETALHES DO PROPRIETÁRIO */}
-      {selectedModel && (
-        <div className="fixed inset-0 z-40 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-          <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl my-auto">
-            {renderImageCarouselModalHeader(selectedModel)}
-            <div className="p-4 sm:p-6 space-y-4 max-h-[55vh] overflow-y-auto">
-              <div className="flex justify-between items-start gap-2">
-                <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="px-2.5 py-1 rounded-md text-xs bg-[#e4e0d7]/15 text-[#e4e0d7]">{selectedModel.category}</span>
-                    {driveStatusCheck[selectedModel.id] === 'missing' && (
-                      <span className="px-2.5 py-1 rounded-md text-xs bg-[#b94a48] text-white font-bold flex items-center gap-1">
-                        <AlertTriangle className="w-3.5 h-3.5" /> Arquivo ZIP não encontrado no Google Drive
-                      </span>
-                    )}
-                  </div>
-                  <h2 className="text-lg font-bold text-[#e4e0d7] mt-2">{selectedModel.name}</h2>
-                </div>
-                <span className="text-xs text-[#8c877e] shrink-0">{formatBytes(selectedModel.drive_file_size)}</span>
-              </div>
-
-              <p className="text-sm text-[#d5d0c5]">{selectedModel.description || 'Sem descrição.'}</p>
-
-              {selectedModel.notes && (
-                <div className="p-3 rounded-xl bg-[#000000] border border-[#262522] text-xs text-[#a39e93]">
-                  <strong className="text-[#e4e0d7]">Observações:</strong> {selectedModel.notes}
-                </div>
-              )}
-
-              <div className="flex flex-wrap justify-between items-center gap-2 pt-2 border-t border-[#1c1b19]">
-                <div className="flex flex-wrap gap-2">
-                  <a href={selectedModel.drive_file_url} target="_blank" rel="noreferrer" className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold inline-flex items-center gap-2">
-                    <ExternalLink className="w-4 h-4" /> Abrir ZIP no Drive
-                  </a>
-                  <button
-                    type="button"
-                    onClick={(e) => handleTogglePrintQueue(selectedModel, e)}
-                    className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer ${
-                      selectedModel.in_print_queue
-                        ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
-                        : 'bg-[#141413] text-[#e4e0d7] border-[#262522]'
-                    }`}
-                  >
-                    <ListOrdered className="w-4 h-4" />
-                    <span>{selectedModel.in_print_queue ? 'Na Fila de Impressão' : '+ Fila de Impressão'}</span>
-                  </button>
-                </div>
-
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => {
-                      const existingPaths = getModelImagePaths(selectedModel);
-                      setEditingModel({
-                        ...selectedModel,
-                        originalModel: selectedModel,
-                        tagsInput: (selectedModel.tags || []).join(', '),
-                        keptImagePaths: existingPaths,
-                        newImageFiles: []
-                      });
-                    }}
-                    className="px-3.5 py-2 bg-[#141413] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs cursor-pointer"
-                  >
-                    Editar / Galeria
-                  </button>
-                  <button onClick={() => { setDeleteConfirmModel(selectedModel); setDeleteAlsoFromDrive(false); }} className="px-3.5 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs cursor-pointer">
-                    Excluir
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {lightboxUrl && (
-        <div onClick={() => setLightboxUrl(null)} className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-3 cursor-zoom-out">
-          <img src={lightboxUrl} alt="Ampliada" className="max-w-full max-h-full rounded-xl border border-[#262522]" />
-        </div>
-      )}
-
-      {/* MODAL DE EDIÇÃO */}
-      {editingModel && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 overflow-y-auto">
-          <form onSubmit={handleSaveEdit} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-4 my-auto max-h-[92vh] overflow-y-auto">
-            <div className="flex justify-between items-center"><h3 className="font-bold text-[#e4e0d7]">Editar Cadastro e Galeria</h3><button type="button" onClick={() => setEditingModel(null)}><X className="w-5 h-5 text-[#8c877e]" /></button></div>
-            <div><label className="block text-xs text-[#a39e93] mb-1">Nome</label><input type="text" required value={editingModel.name} onChange={(e) => setEditingModel({ ...editingModel, name: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
-            {renderCategorySelector(editingModel.category, (val) => setEditingModel({ ...editingModel, category: val }), 'edit')}
-            <div><label className="block text-xs text-[#a39e93] mb-1">Descrição</label><textarea rows={2} value={editingModel.description} onChange={(e) => setEditingModel({ ...editingModel, description: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
-            <div><label className="block text-xs text-[#a39e93] mb-1">Tags (separadas por vírgula)</label><input type="text" value={editingModel.tagsInput} onChange={(e) => setEditingModel({ ...editingModel, tagsInput: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
-            <div><label className="block text-xs text-[#a39e93] mb-1">Observações de Impressão</label><input type="text" value={editingModel.notes || ''} onChange={(e) => setEditingModel({ ...editingModel, notes: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" /></div>
-
-            {editingModel.keptImagePaths?.length > 0 && (
-              <div className="space-y-2">
-                <label className="block text-xs font-semibold text-[#e4e0d7]">
-                  Imagens Atuais ({editingModel.keptImagePaths.length}) — A primeira é a capa:
-                </label>
-                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
-                  {editingModel.keptImagePaths.map((p, idx) => {
-                    const url = getSignedUrlForPath(p);
-                    return (
-                      <div key={p} className="relative group aspect-video rounded-lg overflow-hidden border border-[#262522] bg-[#000000]">
-                        {url && <img src={url} alt={`Foto ${idx + 1}`} className="w-full h-full object-cover" />}
-                        {idx === 0 && (
-                          <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-[#000000]/80 text-[9px] font-bold text-[#c89d66]">
-                            Capa
-                          </span>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => setEditingModel((prev) => ({
-                            ...prev,
-                            keptImagePaths: prev.keptImagePaths.filter((item) => item !== p)
-                          }))}
-                          className="absolute top-1 right-1 p-1 rounded-full bg-[#b94a48] text-white cursor-pointer"
-                          title="Remover esta imagem"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            <div className="p-3.5 rounded-xl bg-[#000000] border border-dashed border-[#383632] space-y-2">
-              <label className="block text-xs font-semibold text-[#c89d66]">Adicionar Novas Imagens à Galeria</label>
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={(e) => {
-                  const files = Array.from(e.target.files || []);
-                  setEditingModel((prev) => ({
-                    ...prev,
-                    newImageFiles: [...(prev.newImageFiles || []), ...files]
-                  }));
-                }}
-                className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]"
-              />
-              {editingModel.newImageFiles?.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 pt-1">
-                  {editingModel.newImageFiles.map((f, i) => (
-                    <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#141413] border border-[#262522] text-[10px] text-[#70a37f]">
-                      <span className="truncate max-w-[120px]">+{f.name}</span>
-                      <button
-                        type="button"
-                        onClick={() => setEditingModel((prev) => ({
-                          ...prev,
-                          newImageFiles: prev.newImageFiles.filter((_, idx) => idx !== i)
-                        }))}
-                        className="text-[#d96b68] cursor-pointer"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {uploading && (
-              <div className="p-2.5 rounded-xl bg-[#141413] text-xs text-[#e4e0d7] flex items-center gap-2">
-                <RefreshCw className="w-4 h-4 animate-spin" />
-                <span>{uploadStep || 'Salvando alterações...'}</span>
-              </div>
-            )}
-
-            <div className="flex justify-end gap-2 pt-2">
-              <button type="button" onClick={() => setEditingModel(null)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
-              <button type="submit" disabled={uploading} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">Salvar</button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {deleteConfirmModel && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
-          <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-md w-full p-6 space-y-4">
-            <h3 className="font-bold text-[#e4e0d7]">Excluir "{deleteConfirmModel.name}"?</h3>
-            <label className="flex items-start gap-2.5 p-3 rounded-xl bg-[#b94a48]/15 border border-[#b94a48]/30 text-xs text-[#e89b99] cursor-pointer">
-              <input type="checkbox" checked={deleteAlsoFromDrive} onChange={(e) => setDeleteAlsoFromDrive(e.target.checked)} className="mt-0.5 accent-[#b94a48]" />
-              <span>Excluir também o arquivo ZIP do Google Drive.</span>
-            </label>
-            <div className="flex justify-end gap-2 pt-2">
-              <button onClick={() => setDeleteConfirmModel(null)} className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs">Cancelar</button>
-              <button onClick={handleDeleteModel} disabled={uploading} className="px-4 py-2 bg-[#b94a48] text-white rounded-xl text-xs font-bold cursor-pointer">Confirmar</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL DE IMPORTAÇÃO COMPLETO */}
-      {importingFile && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3 overflow-y-auto">
-          <form onSubmit={handleConfirmImport} className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-xl w-full p-6 space-y-4 my-auto max-h-[92vh] overflow-y-auto">
-            <div className="flex justify-between items-center">
-              <div>
-                <h3 className="font-bold text-[#e4e0d7] text-base">Cadastrar e Compactar de Aguardando</h3>
-                <p className="text-[11px] text-[#8c877e]">
-                  Compacta em .ZIP &rarr; Salva na Categoria &rarr; Move original para importações/Importadas
-                </p>
-              </div>
-              <button type="button" onClick={() => setImportingFile(null)} disabled={uploading}>
-                <X className="w-5 h-5 text-[#8c877e]" />
-              </button>
-            </div>
-
-            <div className="p-3 rounded-xl bg-[#000000] border border-[#262522] text-xs text-[#a39e93] flex items-center gap-2">
-              <Folder className="w-4 h-4 text-[#c89d66] shrink-0" />
-              <span className="truncate">Selecionado em Aguardando: <strong className="text-[#e4e0d7]">{importingFile.name}</strong></span>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-medium text-[#a39e93] mb-1">Nome do Modelo *</label>
-                <input
-                  type="text"
-                  required
-                  value={importForm.name}
-                  onChange={(e) => setImportForm({ ...importForm, name: e.target.value })}
-                  placeholder="Ex: Dragão Articulado"
-                  className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-                />
-              </div>
-              {renderCategorySelector(importForm.category, (val) => setImportForm({ ...importForm, category: val }), 'import')}
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-[#a39e93] mb-1">Descrição</label>
-              <textarea
-                rows={2}
-                value={importForm.description}
-                onChange={(e) => setImportForm({ ...importForm, description: e.target.value })}
-                placeholder="Detalhes das peças, escala recomendada, suporte..."
-                className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-              />
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-medium text-[#a39e93] mb-1">Tags (separadas por vírgula)</label>
-                <input
-                  type="text"
-                  value={importForm.tags}
-                  onChange={(e) => setImportForm({ ...importForm, tags: e.target.value })}
-                  placeholder="rpg, dragao, sem-suporte"
-                  className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-[#a39e93] mb-1">Observações de Impressão</label>
-                <input
-                  type="text"
-                  value={importForm.notes}
-                  onChange={(e) => setImportForm({ ...importForm, notes: e.target.value })}
-                  placeholder="PLA 205°C, preenchimento 15%"
-                  className="w-full px-3.5 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
-                />
-              </div>
-            </div>
-
-            <div className="p-4 rounded-xl bg-[#000000] border border-dashed border-[#383632] space-y-2">
-              <label className="block text-xs font-semibold text-[#c89d66]">Imagens de Referência (Pode selecionar várias fotos)</label>
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={(e) => {
-                  const files = Array.from(e.target.files || []);
-                  setImportForm((prev) => ({ ...prev, imageFiles: [...prev.imageFiles, ...files] }));
-                }}
-                className="w-full text-xs text-[#a39e93] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-[#262522] file:text-[#e4e0d7]"
-              />
-              {importForm.imageFiles.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 pt-1">
-                  {importForm.imageFiles.map((img, i) => (
-                    <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#141413] border border-[#262522] text-[10px] text-[#70a37f]">
-                      <span className="truncate max-w-[130px]">{img.name}</span>
-                      <button
-                        type="button"
-                        onClick={() => setImportForm((prev) => ({
-                          ...prev,
-                          imageFiles: prev.imageFiles.filter((_, idx) => idx !== i)
-                        }))}
-                        className="text-[#d96b68] cursor-pointer"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {uploading && (
-              <div className="p-3 rounded-xl bg-[#141413] border border-[#e4e0d7]/30 flex items-center gap-3 text-xs text-[#e4e0d7]">
-                <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
-                <span>{uploadStep || 'Compactando e movendo pasta...'}</span>
-              </div>
-            )}
-
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                type="button"
-                disabled={uploading}
-                onClick={() => setImportingFile(null)}
-                className="px-4 py-2 bg-[#141413] text-[#a39e93] rounded-xl text-xs cursor-pointer"
-              >
-                Cancelar
-              </button>
-              <button
-                type="submit"
-                disabled={uploading}
-                className="px-5 py-2 bg-[#e4e0d7] hover:bg-[#d5d0c5] disabled:opacity-50 text-[#000000] rounded-xl text-xs font-bold cursor-pointer"
-              >
-                {uploading ? 'Processando...' : 'Compactar ZIP, Salvar e Mover'}
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {folderPickerOpen && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3">
-          <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl max-w-lg w-full p-6 space-y-5">
-            <div className="flex justify-between items-center"><h3 className="font-bold text-[#e4e0d7]">Pasta Raiz no Google Drive</h3><button onClick={() => setFolderPickerOpen(false)}><X className="w-5 h-5 text-[#8c877e]" /></button></div>
-            <div className="space-y-2">
-              <label className="block text-xs font-semibold text-[#a39e93]">Criar nova pasta:</label>
-              <div className="flex gap-2">
-                <input type="text" value={newFolderName} onChange={(e) => setNewFolderName(e.target.value)} className="flex-1 px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
-                <button type="button" onClick={handleCreateRootFolder} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">Criar e Vincular</button>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <label className="block text-xs font-semibold text-[#a39e93]">Ou selecione:</label>
-              <div className="max-h-48 overflow-y-auto divide-y divide-[#1c1b19] bg-[#000000] border border-[#262522] rounded-xl">
-                {driveFolders.map((f) => (
-                  <div key={f.id} onClick={() => setPendingFolderSelection(f)} className={`p-3 flex justify-between text-xs cursor-pointer ${pendingFolderSelection?.id === f.id ? 'bg-[#e4e0d7]/15 text-[#e4e0d7]' : 'hover:bg-[#121211] text-[#a39e93]'}`}>
-                    <span>{f.name}</span><code className="text-[10px] text-[#6e6a61]">{f.id}</code>
-                  </div>
-                ))}
-              </div>
-            </div>
-            {pendingFolderSelection && (
-              <div className="flex justify-end"><button type="button" onClick={() => saveRootFolderSetting(pendingFolderSelection.id, pendingFolderSelection.name)} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold">Confirmar "{pendingFolderSelection.name}"</button></div>
-            )}
-          </div>
-        </div>
-      )}
+      {/* MODAIS MODULARIZADOS */}
+      <CatalogModals
+        selectedModel={selectedModel}
+        setSelectedModel={setSelectedModel}
+        activeImageIndex={activeImageIndex}
+        setActiveImageIndex={setActiveImageIndex}
+        getSignedUrlForPath={getSignedUrlForPath}
+        setLightboxUrl={setLightboxUrl}
+        lightboxUrl={lightboxUrl}
+        driveStatusCheck={driveStatusCheck}
+        handleTogglePrintQueue={handleTogglePrintQueue}
+        setEditingModel={setEditingModel}
+        editingModel={editingModel}
+        handleSaveEdit={handleSaveEdit}
+        renderCategorySelector={renderCategorySelector}
+        uploading={uploading}
+        uploadStep={uploadStep}
+        deleteConfirmModel={deleteConfirmModel}
+        setDeleteConfirmModel={setDeleteConfirmModel}
+        deleteAlsoFromDrive={deleteAlsoFromDrive}
+        setDeleteAlsoFromDrive={setDeleteAlsoFromDrive}
+        handleDeleteModel={handleDeleteModel}
+        importingFile={importingFile}
+        setImportingFile={setImportingFile}
+        importForm={importForm}
+        setImportForm={setImportForm}
+        handleConfirmImport={handleConfirmImport}
+        folderPickerOpen={folderPickerOpen}
+        setFolderPickerOpen={setFolderPickerOpen}
+        newFolderName={newFolderName}
+        setNewFolderName={setNewFolderName}
+        handleCreateRootFolder={handleCreateRootFolder}
+        driveFolders={driveFolders}
+        pendingFolderSelection={pendingFolderSelection}
+        setPendingFolderSelection={setPendingFolderSelection}
+        saveRootFolderSetting={saveRootFolderSetting}
+        bulkCategoryModalOpen={bulkCategoryModalOpen}
+        setBulkCategoryModalOpen={setBulkCategoryModalOpen}
+        selectedModelIds={selectedModelIds}
+        bulkTargetCategory={bulkTargetCategory}
+        setBulkTargetCategory={setBulkTargetCategory}
+        handleConfirmBulkCategoryChange={handleConfirmBulkCategoryChange}
+        bulkDeleteModalOpen={bulkDeleteModalOpen}
+        setBulkDeleteModalOpen={setBulkDeleteModalOpen}
+        bulkDeleteAlsoDrive={bulkDeleteAlsoDrive}
+        setBulkDeleteAlsoDrive={setBulkDeleteAlsoDrive}
+        handleConfirmBulkDelete={handleConfirmBulkDelete}
+        shareModalOpen={shareModalOpen}
+        setShareModalOpen={setShareModalOpen}
+        shareForm={shareForm}
+        setShareForm={setShareForm}
+        allCategories={allCategories}
+        handleCreateSharedLink={handleCreateSharedLink}
+        creatingShareLink={creatingShareLink}
+        sharedLinks={sharedLinks}
+        copyShareUrlToClipboard={copyShareUrlToClipboard}
+        handleDeleteSharedLink={handleDeleteSharedLink}
+        newMaterialModal={newMaterialModal}
+        setNewMaterialModal={setNewMaterialModal}
+        matForm={matForm}
+        setMatForm={setMatForm}
+        handleSaveMaterial={handleSaveMaterial}
+        newPrinterModal={newPrinterModal}
+        setNewPrinterModal={setNewPrinterModal}
+        printForm={printForm}
+        setPrintForm={setPrintForm}
+        handleSavePrinter={handleSavePrinter}
+      />
     </div>
   );
 }
