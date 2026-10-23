@@ -950,6 +950,74 @@ export default function App() {
     codeClient.requestCode();
   };
 
+  // Função que abre o modal de compartilhamento com os filtros atuais da tela
+  const openShareModalWithCurrentFilters = () => {
+    const defaultTitle =
+      selectedCategory !== 'Todas'
+        ? `Vitrine: ${selectedCategory}${searchInput ? ` (${searchInput})` : ''}`
+        : searchInput
+          ? `Vitrine: "${searchInput}"`
+          : 'Catálogo Completo Biblioteca STL';
+
+    setShareForm({
+      title: defaultTitle,
+      category_filter: selectedCategory,
+      search_filter: searchInput.trim(),
+      tags_input: ''
+    });
+    setShareModalOpen(true);
+  };
+
+  const handleCreateSharedLink = async (e) => {
+    e.preventDefault();
+    if (!supabase || !session?.user) return;
+    setCreatingShareLink(true);
+    try {
+      const tagsArray = shareForm.tags_input
+        ? shareForm.tags_input.split(',').map((t) => t.trim()).filter(Boolean)
+        : [];
+
+      const { data: created, error } = await supabase
+        .from('shared_catalog_links')
+        .insert({
+          user_id: session.user.id,
+          title: shareForm.title.trim() || 'Catálogo Compartilhado',
+          category_filter: shareForm.category_filter || 'Todas',
+          search_filter: shareForm.search_filter.trim(),
+          tags_filter: tagsArray,
+          active: true
+        })
+        .select('*')
+        .single();
+
+      if (error) throw error;
+
+      setSharedLinks((prev) => [created, ...prev]);
+      const shareUrl = `${window.location.origin}/?share=${created.id}`;
+      await navigator.clipboard.writeText(shareUrl).catch(() => { });
+      showToast('Link da vitrine criado e copiado para a área de transferência!');
+    } catch (err) {
+      showToast(`Erro ao criar link: ${err.message}`, 'error');
+    } finally {
+      setCreatingShareLink(false);
+    }
+  };
+
+  const handleDeleteSharedLink = async (id) => {
+    if (!supabase) return;
+    const { error } = await supabase.from('shared_catalog_links').delete().eq('id', id);
+    if (!error) {
+      setSharedLinks((prev) => prev.filter((l) => l.id !== id));
+      showToast('Link revogado e excluído!');
+    }
+  };
+
+  const copyShareUrlToClipboard = async (id) => {
+    const url = `${window.location.origin}/?share=${id}`;
+    await navigator.clipboard.writeText(url);
+    showToast('Link copiado!');
+  };
+
   if (!session) {
     return (
       <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex items-center justify-center p-4">
@@ -1180,8 +1248,8 @@ export default function App() {
                       setSelectedModelIds([]);
                     }}
                     className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${bulkMode
-                        ? 'bg-[#e4e0d7] text-[#000000] border-[#e4e0d7]'
-                        : 'bg-[#000000] text-[#a39e93] hover:text-[#e4e0d7] border-[#262522]'
+                      ? 'bg-[#e4e0d7] text-[#000000] border-[#e4e0d7]'
+                      : 'bg-[#000000] text-[#a39e93] hover:text-[#e4e0d7] border-[#262522]'
                       }`}
                   >
                     <CheckSquare className="w-3.5 h-3.5" />
@@ -1213,8 +1281,8 @@ export default function App() {
                       type="button"
                       onClick={() => setOnlyGhostFilter(!onlyGhostFilter)}
                       className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer transition ${onlyGhostFilter
-                          ? 'bg-[#b94a48] text-white border-[#b94a48]'
-                          : 'bg-[#b94a48]/15 text-[#e89b99] border-[#b94a48]/40'
+                        ? 'bg-[#b94a48] text-white border-[#b94a48]'
+                        : 'bg-[#b94a48]/15 text-[#e89b99] border-[#b94a48]/40'
                         }`}
                     >
                       <AlertTriangle className="w-3.5 h-3.5" />
@@ -1339,10 +1407,10 @@ export default function App() {
                           }
                         }}
                         className={`group bg-[#0a0a0a] border rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg ${isSelectedBulk
-                            ? 'border-[#c89d66] ring-2 ring-[#c89d66]/40'
-                            : isGhost
-                              ? 'border-[#b94a48]'
-                              : 'border-[#262522] hover:border-[#e4e0d7]/60'
+                          ? 'border-[#c89d66] ring-2 ring-[#c89d66]/40'
+                          : isGhost
+                            ? 'border-[#b94a48]'
+                            : 'border-[#262522] hover:border-[#e4e0d7]/60'
                           }`}
                       >
                         <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
@@ -1382,8 +1450,8 @@ export default function App() {
                             type="button"
                             onClick={(e) => handleTogglePrintQueue(model, e)}
                             className={`absolute top-2.5 right-2.5 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition cursor-pointer ${model.in_print_queue
-                                ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
-                                : 'bg-[#000000]/80 text-[#a39e93] hover:text-white border-[#262522]'
+                              ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
+                              : 'bg-[#000000]/80 text-[#a39e93] hover:text-white border-[#262522]'
                               }`}
                           >
                             <ListOrdered className="w-3 h-3" />
@@ -1468,8 +1536,8 @@ export default function App() {
                         type="button"
                         onClick={() => setCurrentPage(num)}
                         className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${num === safeCurrentPage
-                            ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
-                            : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7]'
+                          ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
+                          : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7]'
                           }`}
                       >
                         {num}
@@ -1575,7 +1643,7 @@ export default function App() {
         folderPickerOpen={folderPickerOpen}
         setFolderPickerOpen={setFolderPickerOpen}
         newFolderName={newFolderName}
-        setNewFolderName={setNewFolderName}
+        setNewFolderName={newFolderName}
         handleCreateRootFolder={handleCreateRootFolder}
         driveFolders={driveFolders}
         pendingFolderSelection={pendingFolderSelection}
