@@ -1052,6 +1052,30 @@ export default function App() {
     }
   };
 
+  const handleRetryMetadataSave = async () => {
+    if (!pendingRecovery) return;
+    setUploading(true);
+    try {
+      await completeDatabaseRegistration(
+        pendingRecovery.driveData,
+        pendingRecovery.folderId,
+        pendingRecovery.formSnapshot
+      );
+      setPendingRecovery(null);
+      setUploadForm({
+        name: '', description: '', category: 'Geral', tags: '', notes: '', zipFile: null, imageFiles: []
+      });
+      showToast('Cadastro recuperado e concluído com sucesso!');
+      setActiveTab('catalogo');
+      loadUserData(true);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setUploading(false);
+      setUploadStep('');
+    }
+  };
+  
   if (!session) {
     return (
       <div className="min-h-screen bg-[#000000] text-[#e4e0d7] flex items-center justify-center p-4">
