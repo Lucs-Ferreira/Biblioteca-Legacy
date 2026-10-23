@@ -1230,6 +1230,32 @@ export default function App() {
       )}
     </div>
   );
+
+  const fetchAwaitingImports = async () => {
+    if (!settings.root_folder_id) return;
+    setLoadingDriveZips(true);
+    try {
+      const pipeline = await ensureImportPipelineFolders(settings.root_folder_id);
+      const q = encodeURIComponent(`'${pipeline.aguardandoId}' in parents and trashed = false`);
+      const res = await googleDriveFetch(
+        `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,size,createdTime,webViewLink,parents)&pageSize=100`
+      );
+      if (!res.ok) throw new Error('Erro ao listar itens da pasta importações/Aguardando.');
+      const data = await res.json();
+      setAwaitingItems(data.files || []);
+      awaitingLoadedRef.current = true;
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoadingDriveZips(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'importar' && googleConnected && settings.root_folder_id && !awaitingLoadedRef.current) {
+      fetchAwaitingImports();
+    }
+  }, [activeTab, googleConnected, settings.root_folder_id]);
   
   if (!session) {
     return (
