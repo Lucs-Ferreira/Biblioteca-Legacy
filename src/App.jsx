@@ -695,11 +695,11 @@ export default function App() {
       baseList = !q
         ? [...list]
         : list.filter(
-            (m) =>
-              m.name?.toLowerCase().includes(q) ||
-              m.description?.toLowerCase().includes(q) ||
-              m.tags?.some((t) => t.toLowerCase().includes(q))
-          );
+          (m) =>
+            m.name?.toLowerCase().includes(q) ||
+            m.description?.toLowerCase().includes(q) ||
+            m.tags?.some((t) => t.toLowerCase().includes(q))
+        );
     } else {
       baseList = models.filter((m) => {
         if (onlyGhostFilter && driveStatusCheck[m.id] !== 'missing') return false;
@@ -736,7 +736,18 @@ export default function App() {
     onlyGhostFilter,
     driveStatusCheck
   ]);
-  
+
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(activeModelsSource.length / itemsPerPage));
+  }, [activeModelsSource.length, itemsPerPage]);
+
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+
+  const paginatedModels = useMemo(() => {
+    const startIndex = (safeCurrentPage - 1) * itemsPerPage;
+    return activeModelsSource.slice(startIndex, startIndex + itemsPerPage);
+  }, [activeModelsSource, safeCurrentPage, itemsPerPage]);
+
   const fetchRootSubfolders = async (rootIdOverride) => {
     const rootId = rootIdOverride || settings.root_folder_id;
     if (!rootId) return [];
@@ -2094,8 +2105,8 @@ export default function App() {
                       setSelectedModelIds([]);
                     }}
                     className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${bulkMode
-                        ? 'bg-[#e4e0d7] text-[#000000] border-[#e4e0d7]'
-                        : 'bg-[#000000] text-[#a39e93] hover:text-[#e4e0d7] border-[#262522]'
+                      ? 'bg-[#e4e0d7] text-[#000000] border-[#e4e0d7]'
+                      : 'bg-[#000000] text-[#a39e93] hover:text-[#e4e0d7] border-[#262522]'
                       }`}
                   >
                     <CheckSquare className="w-3.5 h-3.5" />
@@ -2127,8 +2138,8 @@ export default function App() {
                       type="button"
                       onClick={() => setOnlyGhostFilter(!onlyGhostFilter)}
                       className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer transition ${onlyGhostFilter
-                          ? 'bg-[#b94a48] text-white border-[#b94a48]'
-                          : 'bg-[#b94a48]/15 text-[#e89b99] border-[#b94a48]/40'
+                        ? 'bg-[#b94a48] text-white border-[#b94a48]'
+                        : 'bg-[#b94a48]/15 text-[#e89b99] border-[#b94a48]/40'
                         }`}
                     >
                       <AlertTriangle className="w-3.5 h-3.5" />
@@ -2253,10 +2264,10 @@ export default function App() {
                           }
                         }}
                         className={`group bg-[#0a0a0a] border rounded-2xl overflow-hidden flex flex-col transition cursor-pointer shadow-lg ${isSelectedBulk
-                            ? 'border-[#c89d66] ring-2 ring-[#c89d66]/40'
-                            : isGhost
-                              ? 'border-[#b94a48]'
-                              : 'border-[#262522] hover:border-[#e4e0d7]/60'
+                          ? 'border-[#c89d66] ring-2 ring-[#c89d66]/40'
+                          : isGhost
+                            ? 'border-[#b94a48]'
+                            : 'border-[#262522] hover:border-[#e4e0d7]/60'
                           }`}
                       >
                         <div className="aspect-video bg-[#000000] relative overflow-hidden flex items-center justify-center border-b border-[#1a1917]">
@@ -2296,8 +2307,8 @@ export default function App() {
                             type="button"
                             onClick={(e) => handleTogglePrintQueue(model, e)}
                             className={`absolute top-2.5 right-2.5 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition cursor-pointer ${model.in_print_queue
-                                ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
-                                : 'bg-[#000000]/80 text-[#a39e93] hover:text-white border-[#262522]'
+                              ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
+                              : 'bg-[#000000]/80 text-[#a39e93] hover:text-white border-[#262522]'
                               }`}
                           >
                             <ListOrdered className="w-3 h-3" />
@@ -2382,8 +2393,8 @@ export default function App() {
                         type="button"
                         onClick={() => setCurrentPage(num)}
                         className={`min-w-[36px] h-9 px-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${num === safeCurrentPage
-                            ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
-                            : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7]'
+                          ? 'bg-[#e4e0d7] text-[#000000] shadow-md'
+                          : 'bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7]'
                           }`}
                       >
                         {num}
@@ -2498,10 +2509,10 @@ export default function App() {
                             value={prio}
                             onChange={(e) => handleChangeQueuePriority(model, e.target.value)}
                             className={`px-2.5 py-1.5 rounded-xl text-xs font-bold border cursor-pointer ${prio === 'Alta'
-                                ? 'bg-[#b94a48]/20 text-[#e89b99] border-[#b94a48]/40'
-                                : prio === 'Baixa'
-                                  ? 'bg-[#141413] text-[#8c877e] border-[#262522]'
-                                  : 'bg-[#c89d66]/20 text-[#c89d66] border-[#c89d66]/40'
+                              ? 'bg-[#b94a48]/20 text-[#e89b99] border-[#b94a48]/40'
+                              : prio === 'Baixa'
+                                ? 'bg-[#141413] text-[#8c877e] border-[#262522]'
+                                : 'bg-[#c89d66]/20 text-[#c89d66] border-[#c89d66]/40'
                               }`}
                           >
                             <option value="Alta" className="bg-[#0a0a0a] text-[#e4e0d7]">Alta</option>
@@ -3360,8 +3371,8 @@ export default function App() {
                     type="button"
                     onClick={(e) => handleTogglePrintQueue(selectedModel, e)}
                     className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer ${selectedModel.in_print_queue
-                        ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
-                        : 'bg-[#141413] text-[#e4e0d7] border-[#262522]'
+                      ? 'bg-[#c89d66] text-[#000000] border-[#c89d66]'
+                      : 'bg-[#141413] text-[#e4e0d7] border-[#262522]'
                       }`}
                   >
                     <ListOrdered className="w-4 h-4" />
