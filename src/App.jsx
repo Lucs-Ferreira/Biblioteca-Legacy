@@ -2276,7 +2276,7 @@ export default function App() {
   const renderCategorySelector = (currentValue, onSelectChange, contextKey) => (
     <div>
       <div className="flex items-center justify-between mb-1">
-        <label className="block text-xs font-medium text-[#a39e93]">Categoria (Subpasta no Drive)</label>
+        <label className="block text-xs font-medium text-[#a39e93]">Categoria</label>
         <button
           type="button"
           onClick={() => { setAddingCategoryContext(addingCategoryContext === contextKey ? null : contextKey); setNewCategoryName(''); }}
