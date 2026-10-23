@@ -72,10 +72,10 @@ export default function App() {
   const [googleToken, setGoogleToken] = useState(() => localStorage.getItem('stl_google_access_token') || '');
   const [googleUserEmail, setGoogleUserEmail] = useState(() => localStorage.getItem('stl_google_email') || '');
   const [googleConnected, setGoogleConnected] = useState(false);
-  const tokenClientRef = useRef(null);
-  const autoSyncedRef = useRef(false);
 
-  // Refs de controle de cache para evitar recarregamento ao alternar abas
+  // Refs de controle para evitar pop-ups repetidos e chamadas concorrentes
+  const refreshTokenRef = useRef(localStorage.getItem('stl_google_refresh_token') || '');
+  const refreshPromiseRef = useRef(null);
   const loadedUserIdRef = useRef(null);
   const awaitingLoadedRef = useRef(false);
   const signedUrlsCacheRef = useRef({});
@@ -91,7 +91,8 @@ export default function App() {
     energy_cost_kwh: 0.95,
     default_failure_rate: 5,
     default_post_processing_pct: 15,
-    labor_hourly_rate: 25.00
+    labor_hourly_rate: 25.00,
+    google_refresh_token: ''
   });
 
   const [existingSubfolders, setExistingSubfolders] = useState([]);
@@ -120,7 +121,6 @@ export default function App() {
   const [signedUrls, setSignedUrls] = useState({});
   const [loadingData, setLoadingData] = useState(false);
 
-  // Estados de Busca Rápida e Paginação
   const [activeTab, setActiveTab] = useState('catalogo');
   const [searchInput, setSearchInput] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
@@ -183,7 +183,6 @@ export default function App() {
     setTimeout(() => setToast(null), 6000);
   };
 
-  // Debounce super rápido (150ms) para que a digitação na pesquisa nunca trave a interface
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedQuery(searchInput.trim().toLowerCase());
@@ -192,7 +191,6 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [searchInput]);
 
-  // Sempre volta para a página 1 quando trocar a categoria ou o limite por página
   useEffect(() => {
     setCurrentPage(1);
   }, [selectedCategory, itemsPerPage]);
@@ -203,44 +201,68 @@ export default function App() {
     return Array.from(new Set([...BASE_CATEGORIES, ...custom, ...fromModels]));
   }, [settings.custom_categories, models]);
 
-  const saveTokenData = (token, expiresInSec = 3500) => {
+  // ============================================================================
+  // GERENCIAMENTO SILENCIOSO DE TOKENS (Sem abrir pop-ups automáticos!)
+  // ============================================================================
+  const saveTokenData = (accessToken, expiresInSec = 3500, newRefreshToken = null) => {
     const expiryTime = Date.now() + expiresInSec * 1000;
-    setGoogleToken(token);
+    setGoogleToken(accessToken);
     setGoogleConnected(true);
-    localStorage.setItem('stl_google_access_token', token);
+    localStorage.setItem('stl_google_access_token', accessToken);
     localStorage.setItem('stl_google_token_expiry', String(expiryTime));
+
+    if (newRefreshToken) {
+      refreshTokenRef.current = newRefreshToken;
+      localStorage.setItem('stl_google_refresh_token', newRefreshToken);
+    }
   };
 
+  // Renova o access_token em segundo plano via API da Vercel usando o refresh_token salvo no Supabase
+  const refreshAccessTokenViaBackend = async (rtToUse) => {
+    const rt = rtToUse || refreshTokenRef.current || localStorage.getItem('stl_google_refresh_token');
+    if (!rt || rt === 'connected' || rt === 'active_session_token') {
+      throw new Error('Clique em "Conectar Conta Google" uma única vez para ativar a conexão definitiva.');
+    }
+
+    const res = await fetch('/api/google-auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: rt })
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.access_token) {
+      throw new Error(data.error || 'Falha ao renovar sessão do Google Drive.');
+    }
+
+    saveTokenData(data.access_token, data.expires_in || 3500);
+    return data.access_token;
+  };
+
+  // Garante um token válido usando um Mutex (refreshPromiseRef) para nunca fazer várias renovações simultâneas
   const ensureValidGoogleToken = async () => {
     const storedToken = googleToken || localStorage.getItem('stl_google_access_token');
     const expiry = Number(localStorage.getItem('stl_google_token_expiry') || 0);
 
+    // Se o token atual ainda é válido por pelo menos 2 minutos, usa ele imediatamente
     if (storedToken && Date.now() < expiry - 120000) {
       return storedToken;
     }
 
-    if (!window.google?.accounts?.oauth2 || !GOOGLE_CLIENT_ID) {
-      throw new Error('Serviço de autenticação do Google não disponível.');
+    // Se já houver uma renovação em andamento, aguarda a mesma promessa (evita loop de chamadas)
+    if (refreshPromiseRef.current) {
+      return refreshPromiseRef.current;
     }
 
-    return new Promise((resolve, reject) => {
-      const client = window.google.accounts.oauth2.initTokenClient({
-        client_id: GOOGLE_CLIENT_ID,
-        scope: GOOGLE_SCOPES,
-        prompt: '',
-        hint: googleUserEmail || localStorage.getItem('stl_google_email') || undefined,
-        callback: (response) => {
-          if (response.error) {
-            setGoogleConnected(false);
-            reject(new Error('Sua sessão do Google expirou. Conecte novamente.'));
-            return;
-          }
-          saveTokenData(response.access_token, response.expires_in || 3500);
-          resolve(response.access_token);
-        }
-      });
-      client.requestAccessToken({ prompt: '' });
-    });
+    refreshPromiseRef.current = (async () => {
+      try {
+        return await refreshAccessTokenViaBackend();
+      } finally {
+        refreshPromiseRef.current = null;
+      }
+    })();
+
+    return refreshPromiseRef.current;
   };
 
   const googleDriveFetch = async (url, options = {}) => {
@@ -288,7 +310,6 @@ export default function App() {
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, newSession) => {
-      // Evita recarregar dados quando o navegador apenas renova o token ao voltar para a aba
       if (event === 'SIGNED_OUT') {
         loadedUserIdRef.current = null;
         awaitingLoadedRef.current = false;
@@ -302,7 +323,6 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  // Carrega dados apenas 1 vez por usuário autenticado (ou quando solicitado manualmente)
   useEffect(() => {
     const currentUserId = session?.user?.id;
     if (currentUserId && loadedUserIdRef.current !== currentUserId) {
@@ -311,7 +331,6 @@ export default function App() {
     }
   }, [session?.user?.id]);
 
-  // Busca em lote (1 única requisição rápida) as URLs assinadas apenas para os modelos visíveis na página atual
   const ensureSignedUrlsForModels = useCallback(async (modelsToLoad) => {
     if (!supabase || !modelsToLoad?.length) return;
 
@@ -344,7 +363,6 @@ export default function App() {
     if (!supabase || !session?.user) return;
     if (!silent) setLoadingData(true);
     try {
-      // Executa todas as consultas ao Supabase em paralelo (Promise.all) para máxima velocidade
       const [cfgRes, modelsRes, matRes, printRes] = await Promise.all([
         supabase.from('user_settings').select('*').eq('user_id', session.user.id).maybeSingle(),
         supabase.from('stl_models').select('*').order('created_at', { ascending: false }),
@@ -359,24 +377,29 @@ export default function App() {
         const dbCats = Array.isArray(cfg.custom_categories) ? cfg.custom_categories : [];
         const mergedCats = Array.from(new Set([...dbCats, ...localCachedCats]));
 
-        const migrationDone = localStorage.getItem(`stl_subfolders_migrated_${session.user.id}`);
-        let shouldUseSubfolders = cfg.organize_by_subfolders ?? true;
-        if (!migrationDone) {
-          shouldUseSubfolders = true;
-          localStorage.setItem(`stl_subfolders_migrated_${session.user.id}`, 'true');
-          supabase.from('user_settings').update({ organize_by_subfolders: true }).eq('user_id', session.user.id);
+        const validSavedRefreshToken =
+          cfg.google_refresh_token &&
+          cfg.google_refresh_token !== 'connected' &&
+          cfg.google_refresh_token !== 'active_session_token'
+            ? cfg.google_refresh_token
+            : '';
+
+        if (validSavedRefreshToken) {
+          refreshTokenRef.current = validSavedRefreshToken;
+          localStorage.setItem('stl_google_refresh_token', validSavedRefreshToken);
         }
 
         setSettings({
           root_folder_id: cfg.root_folder_id || '',
           root_folder_name: cfg.root_folder_name || '',
-          organize_by_subfolders: shouldUseSubfolders,
+          organize_by_subfolders: cfg.organize_by_subfolders ?? true,
           max_upload_size_mb: cfg.max_upload_size_mb || 150,
           custom_categories: mergedCats,
           energy_cost_kwh: cfg.energy_cost_kwh ?? 0.95,
           default_failure_rate: cfg.default_failure_rate ?? 5,
           default_post_processing_pct: cfg.default_post_processing_pct ?? 15,
-          labor_hourly_rate: cfg.labor_hourly_rate ?? 25.00
+          labor_hourly_rate: cfg.labor_hourly_rate ?? 25.00,
+          google_refresh_token: validSavedRefreshToken
         });
 
         setCalcForm((prev) => ({
@@ -386,12 +409,21 @@ export default function App() {
 
         const cachedToken = localStorage.getItem('stl_google_access_token');
         const expiry = Number(localStorage.getItem('stl_google_token_expiry') || 0);
-        if (cachedToken && Date.now() < expiry) {
+
+        // 1. Se o access_token no navegador ainda está válido, usa direto sem requisição
+        if (cachedToken && Date.now() < expiry - 60000) {
           setGoogleToken(cachedToken);
           setGoogleConnected(true);
           fetchUserInfo(cachedToken);
-        } else if (cfg.google_refresh_token) {
-          setGoogleConnected(true);
+        } else if (validSavedRefreshToken) {
+          // 2. Se expirou, renova silenciosamente via backend da Vercel usando o refresh_token definitivo
+          try {
+            const newAccess = await refreshAccessTokenViaBackend(validSavedRefreshToken);
+            fetchUserInfo(newAccess);
+          } catch (err) {
+            console.warn('Não foi possível renovar automaticamente:', err.message);
+            setGoogleConnected(false);
+          }
         }
       } else if (localCachedCats.length > 0) {
         setSettings((prev) => ({ ...prev, custom_categories: localCachedCats, organize_by_subfolders: true }));
@@ -418,9 +450,6 @@ export default function App() {
     }
   };
 
-  // ============================================================================
-  // FILTRAGEM RÁPIDA + PAGINAÇÃO DO CATÁLOGO
-  // ============================================================================
   const filteredModels = useMemo(() => {
     return models.filter((m) => {
       const matchesCat = selectedCategory === 'Todas' || m.category === selectedCategory;
@@ -446,14 +475,12 @@ export default function App() {
     return filteredModels.slice(startIndex, startIndex + itemsPerPage);
   }, [filteredModels, safeCurrentPage, itemsPerPage]);
 
-  // Carrega instantaneamente em lote as imagens da página visível atual
   useEffect(() => {
     if (paginatedModels.length > 0) {
       ensureSignedUrlsForModels(paginatedModels);
     }
   }, [paginatedModels, ensureSignedUrlsForModels]);
 
-  // Lista de números de páginas para o seletor de paginação
   const pageNumbers = useMemo(() => {
     const pages = [];
     const maxVisible = 5;
@@ -467,15 +494,6 @@ export default function App() {
     }
     return pages;
   }, [safeCurrentPage, totalPages]);
-
-  useEffect(() => {
-    if (googleConnected && settings.root_folder_id && settings.organize_by_subfolders && !autoSyncedRef.current) {
-      autoSyncedRef.current = true;
-      handleSyncAllCategorySubfolders(settings.root_folder_id, true);
-    } else if (googleConnected && settings.root_folder_id && existingSubfolders.length === 0) {
-      fetchRootSubfolders(settings.root_folder_id);
-    }
-  }, [googleConnected, settings.root_folder_id, settings.organize_by_subfolders]);
 
   const fetchUserInfo = async (token) => {
     try {
@@ -494,6 +512,9 @@ export default function App() {
     }
   };
 
+  // ============================================================================
+  // VINCULAÇÃO DEFINITIVA (1 ÚNICA VEZ) COM REFRESH TOKEN OFFLINE
+  // ============================================================================
   const handleConnectGoogle = () => {
     if (!GOOGLE_CLIENT_ID) {
       showToast('VITE_GOOGLE_CLIENT_ID não configurado.', 'error');
@@ -504,52 +525,83 @@ export default function App() {
       return;
     }
 
-    const tokenClient = window.google.accounts.oauth2.initTokenClient({
+    // Usa initCodeClient (Authorization Code Flow) para obter um refresh_token real e vitalício
+    const codeClient = window.google.accounts.oauth2.initCodeClient({
       client_id: GOOGLE_CLIENT_ID,
       scope: GOOGLE_SCOPES,
+      ux_mode: 'popup',
+      access_type: 'offline',
+      prompt: 'consent',
       callback: async (response) => {
         if (response.error) {
           showToast(`Erro na autorização Google: ${response.error}`, 'error');
           return;
         }
 
-        const token = response.access_token;
-        saveTokenData(token, response.expires_in || 3500);
+        if (!response.code) return;
 
-        if (supabase && session?.user) {
-          await supabase
-            .from('user_settings')
-            .upsert({
-              user_id: session.user.id,
-              google_refresh_token: 'connected',
-              root_folder_id: settings.root_folder_id,
-              root_folder_name: settings.root_folder_name,
-              organize_by_subfolders: settings.organize_by_subfolders,
-              max_upload_size_mb: settings.max_upload_size_mb,
-              custom_categories: settings.custom_categories,
-              updated_at: new Date().toISOString()
-            });
-        }
+        try {
+          // Troca o código pelo access_token + refresh_token através da API da Vercel
+          const tokenRes = await fetch('/api/google-auth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: response.code })
+          });
 
-        await fetchUserInfo(token);
-        showToast('Conta Google conectada com sucesso!');
-        if (!settings.root_folder_id) {
-          openFolderPicker();
+          const tokenData = await tokenRes.json().catch(() => ({}));
+          if (!tokenRes.ok || !tokenData.access_token) {
+            throw new Error(
+              tokenData.error ||
+                'Falha ao obter token definitivo. Verifique se GOOGLE_CLIENT_SECRET está configurado na Vercel.'
+            );
+          }
+
+          const finalRefreshToken =
+            tokenData.refresh_token ||
+            refreshTokenRef.current ||
+            settings.google_refresh_token;
+
+          saveTokenData(tokenData.access_token, tokenData.expires_in || 3500, finalRefreshToken);
+
+          if (supabase && session?.user && finalRefreshToken) {
+            await supabase
+              .from('user_settings')
+              .upsert({
+                user_id: session.user.id,
+                google_refresh_token: finalRefreshToken,
+                root_folder_id: settings.root_folder_id,
+                root_folder_name: settings.root_folder_name,
+                organize_by_subfolders: settings.organize_by_subfolders,
+                max_upload_size_mb: settings.max_upload_size_mb,
+                custom_categories: settings.custom_categories,
+                updated_at: new Date().toISOString()
+              });
+            setSettings((prev) => ({ ...prev, google_refresh_token: finalRefreshToken }));
+          }
+
+          await fetchUserInfo(tokenData.access_token);
+          showToast('Conta Google vinculada definitivamente! Você não precisará conectar novamente.');
+          if (!settings.root_folder_id) {
+            openFolderPicker();
+          }
+        } catch (err) {
+          showToast(err.message, 'error');
         }
       }
     });
 
-    tokenClientRef.current = tokenClient;
-    tokenClient.requestAccessToken({ prompt: 'consent' });
+    codeClient.requestCode();
   };
 
   const handleDisconnectGoogle = async () => {
     setGoogleToken('');
     setGoogleUserEmail('');
     setGoogleConnected(false);
+    refreshTokenRef.current = '';
     localStorage.removeItem('stl_google_access_token');
     localStorage.removeItem('stl_google_token_expiry');
     localStorage.removeItem('stl_google_email');
+    localStorage.removeItem('stl_google_refresh_token');
 
     if (supabase && session?.user) {
       await supabase
@@ -746,7 +798,6 @@ export default function App() {
     if (settings.organize_by_subfolders && settings.root_folder_id && googleConnected) {
       try {
         await ensureCategorySubfolderInDrive(trimmed);
-        await fetchRootSubfolders(settings.root_folder_id);
       } catch (err) {
         console.warn('Erro ao criar subpasta automática:', err);
       }
@@ -763,7 +814,7 @@ export default function App() {
     setNewCategoryName('');
     setAddingCategoryContext(null);
     setSavingCategory(false);
-    showToast(`Categoria "${trimmed}" salva e subpasta montada no Google Drive!`);
+    showToast(`Categoria "${trimmed}" salva!`);
   };
 
   const handleRemoveCustomCategory = async (catToRemove) => {
@@ -901,10 +952,6 @@ export default function App() {
         updated_at: new Date().toISOString()
       });
     showToast('Configurações atualizadas!');
-
-    if (newPartial.organize_by_subfolders === true && merged.root_folder_id) {
-      await handleSyncAllCategorySubfolders(merged.root_folder_id, false);
-    }
   };
 
   const handleUploadNewModel = async (e) => {
@@ -1050,9 +1097,6 @@ export default function App() {
     }
   };
 
-  // ============================================================================
-  // FILA DE IMPORTAÇÃO COM CACHE (Evita refazer busca ao alternar abas)
-  // ============================================================================
   const fetchAwaitingImports = async () => {
     if (!settings.root_folder_id) return;
     setLoadingDriveZips(true);
@@ -1074,7 +1118,6 @@ export default function App() {
   };
 
   useEffect(() => {
-    // Só busca automaticamente na primeira vez que abrir a aba Importar; nas próximas usa o cache instantâneo
     if (activeTab === 'importar' && googleConnected && settings.root_folder_id && !awaitingLoadedRef.current) {
       fetchAwaitingImports();
     }
@@ -1212,7 +1255,6 @@ export default function App() {
         );
       }
 
-      // Remove o item importado da lista em memória imediatamente
       setAwaitingItems((prev) => prev.filter((i) => i.id !== importingFile.id));
       setImportingFile(null);
       loadUserData(true);
@@ -1271,7 +1313,6 @@ export default function App() {
           await supabase.storage.from('stl-images').remove([editingModel.image_path]);
         }
 
-        // Limpa o cache da imagem antiga para forçar a nova URL assinada
         delete signedUrlsCacheRef.current[editingModel.id];
         imagePath = fileName;
       }
@@ -1602,7 +1643,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Navegação Desktop */}
           <nav className="hidden md:flex items-center gap-2">
             <button onClick={() => setActiveTab('catalogo')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
               <Box className="w-4 h-4" /><span>Catálogo ({models.length})</span>
@@ -1630,7 +1670,6 @@ export default function App() {
             </button>
           </nav>
 
-          {/* Botão Hambúrguer Mobile */}
           <div className="md:hidden flex items-center">
             <button onClick={() => setMobileMenuOpen(!mobileMenuOpen)} className="p-2 rounded-xl bg-[#0a0a0a] border border-[#262522] text-[#e4e0d7] cursor-pointer">
               {mobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
@@ -1638,7 +1677,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Menu Suspenso Mobile */}
         {mobileMenuOpen && (
           <div className="md:hidden bg-[#0a0a0a] border-b border-[#262522] px-4 py-3 space-y-2">
             <button onClick={() => { setActiveTab('catalogo'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'catalogo' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
@@ -1672,13 +1710,21 @@ export default function App() {
           <div className="max-w-7xl mx-auto px-3 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2.5 text-xs sm:text-sm text-[#e4e0d7]">
               <HardDrive className="w-5 h-5 text-[#c89d66] shrink-0" />
-              {!googleConnected ? <span>Conecte sua conta Google para gerenciar seus arquivos e pastas no Google Drive.</span> : <span>Selecione ou crie a pasta raiz <strong>Biblioteca STL</strong> no seu Google Drive.</span>}
+              {!googleConnected ? (
+                <span>Vincule sua conta Google uma única vez para ativar o armazenamento definitivo no Google Drive.</span>
+              ) : (
+                <span>Selecione ou crie a pasta raiz <strong>Biblioteca STL</strong> no seu Google Drive.</span>
+              )}
             </div>
             <div className="self-end sm:self-auto">
               {!googleConnected ? (
-                <button onClick={handleConnectGoogle} className="px-4 py-1.5 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-lg text-xs font-bold transition cursor-pointer">Conectar Conta Google</button>
+                <button onClick={handleConnectGoogle} className="px-4 py-1.5 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-lg text-xs font-bold transition cursor-pointer">
+                  Vincular Conta Google (1x)
+                </button>
               ) : (
-                <button onClick={() => openFolderPicker()} className="px-4 py-1.5 bg-[#c89d66] hover:bg-[#b88c56] text-[#000000] rounded-lg text-xs font-bold transition cursor-pointer">Configurar Pasta Raiz</button>
+                <button onClick={() => openFolderPicker()} className="px-4 py-1.5 bg-[#c89d66] hover:bg-[#b88c56] text-[#000000] rounded-lg text-xs font-bold transition cursor-pointer">
+                  Configurar Pasta Raiz
+                </button>
               )}
             </div>
           </div>
@@ -1689,7 +1735,6 @@ export default function App() {
       <main className="max-w-7xl mx-auto w-full px-3 sm:px-6 py-6 sm:py-8 flex-1">
         {activeTab === 'catalogo' && (
           <div className="space-y-6">
-            {/* Barra de Pesquisa Rápida Expandível + Seletor de Categoria + Seletor de Itens por Página */}
             <div className="flex flex-col lg:flex-row gap-4 items-stretch lg:items-center justify-between bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 sm:p-5">
               <div className="relative w-full lg:w-72 focus-within:lg:w-[440px] transition-all duration-300">
                 <Search className="w-4 h-4 text-[#8c877e] absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -1713,7 +1758,6 @@ export default function App() {
               </div>
 
               <div className="flex flex-wrap sm:flex-nowrap items-center gap-3 w-full lg:w-auto justify-end">
-                {/* Seletor de Categoria */}
                 <div className="flex items-center gap-2 flex-1 sm:flex-initial">
                   <Filter className="w-4 h-4 text-[#c89d66] shrink-0" />
                   <select
@@ -1730,7 +1774,6 @@ export default function App() {
                   </select>
                 </div>
 
-                {/* Seletor de Quantidade por Página */}
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-[#8c877e] whitespace-nowrap">Por página:</span>
                   <select
@@ -1745,7 +1788,6 @@ export default function App() {
                   </select>
                 </div>
 
-                {/* Botão discreto para atualizar manualmente se desejar */}
                 <button
                   type="button"
                   onClick={() => loadUserData(false)}
@@ -1791,7 +1833,6 @@ export default function App() {
               </div>
             ) : (
               <>
-                {/* Grid Paginado de Modelos */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-5">
                   {paginatedModels.map((model) => {
                     const imgUrl = signedUrls[model.id] || signedUrlsCacheRef.current[model.id];
@@ -1841,7 +1882,7 @@ export default function App() {
                   })}
                 </div>
 
-                {/* BARRA DE PAGINAÇÃO MODERNA */}
+                {/* BARRA DE PAGINAÇÃO */}
                 <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
                   <div className="text-xs text-[#8c877e]">
                     Mostrando{' '}
@@ -1860,7 +1901,7 @@ export default function App() {
                       type="button"
                       disabled={safeCurrentPage === 1}
                       onClick={() => setCurrentPage(1)}
-                      className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] disabled:opacity-35 disabled: pointer-events-none cursor-pointer transition"
+                      className="p-2 rounded-xl bg-[#000000] border border-[#262522] text-[#a39e93] hover:text-[#e4e0d7] disabled:opacity-35 disabled:pointer-events-none cursor-pointer transition"
                       title="Primeira Página"
                     >
                       <ChevronsLeft className="w-4 h-4" />
@@ -2234,11 +2275,11 @@ export default function App() {
                   <HardDrive className="w-6 h-6 text-[#e4e0d7] shrink-0" />
                   <div>
                     <h3 className="font-bold text-[#e4e0d7] text-base">Google Drive (Armazenamento Principal)</h3>
-                    <p className="text-xs text-[#8c877e]">Renovação automática de sessão ativa</p>
+                    <p className="text-xs text-[#8c877e]">Conexão definitiva via Refresh Token</p>
                   </div>
                 </div>
                 <span className={`px-3 py-1 rounded-full text-xs font-semibold ${googleConnected ? 'bg-[#4d7c5b]/15 text-[#70a37f] border border-[#4d7c5b]/30' : 'bg-[#c89d66]/15 text-[#c89d66]'}`}>
-                  {googleConnected ? 'Conectado Definitivo' : 'Desconectado'}
+                  {googleConnected ? `Vinculado Definitivo ${googleUserEmail ? `(${googleUserEmail})` : ''}` : 'Não Vinculado'}
                 </span>
               </div>
 
@@ -2254,21 +2295,33 @@ export default function App() {
               </div>
 
               <div className="flex flex-wrap gap-2.5">
-                <button onClick={handleConnectGoogle} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">
-                  {googleConnected ? 'Renovar Autorização Google' : 'Conectar Conta Google'}
-                </button>
-                {googleConnected && (
+                {!googleConnected ? (
+                  <button onClick={handleConnectGoogle} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">
+                    Vincular Conta Google (1 Única Vez)
+                  </button>
+                ) : (
                   <>
-                    <button onClick={() => openFolderPicker()} className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold cursor-pointer">
+                    <button onClick={() => openFolderPicker()} className="px-4 py-2 bg-[#e4e0d7] text-[#000000] rounded-xl text-xs font-bold cursor-pointer">
                       Selecionar Outra Pasta Raiz
                     </button>
+                    {settings.root_folder_id && (
+                      <button
+                        type="button"
+                        disabled={syncingCategoryFolders}
+                        onClick={() => handleSyncAllCategorySubfolders(settings.root_folder_id, false)}
+                        className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold flex items-center gap-2 cursor-pointer"
+                      >
+                        <FolderPlus className={`w-4 h-4 text-[#c89d66] ${syncingCategoryFolders ? 'animate-spin' : ''}`} />
+                        <span>{syncingCategoryFolders ? 'Sincronizando...' : 'Sincronizar Subpastas no Drive'}</span>
+                      </button>
+                    )}
                     {settings.root_folder_id && (
                       <a href={`https://drive.google.com/drive/folders/${settings.root_folder_id}`} target="_blank" rel="noreferrer" className="px-4 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold inline-flex items-center gap-1.5">
                         <span>Abrir Pasta Raiz no Drive</span><ExternalLink className="w-3.5 h-3.5" />
                       </a>
                     )}
                     <button onClick={handleDisconnectGoogle} className="px-4 py-2 bg-[#b94a48]/15 text-[#e89b99] border border-[#b94a48]/30 rounded-xl text-xs font-semibold cursor-pointer">
-                      Desconectar Google
+                      Desvincular Google
                     </button>
                   </>
                 )}
