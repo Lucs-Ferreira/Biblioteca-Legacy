@@ -186,7 +186,7 @@ export default function App() {
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const [driveFolders, setDriveFolders] = useState([]);
   const [loadingFolders, setLoadingFolders] = useState(false);
-  const [newFolderName, setNewFolderName] = useState('Biblioteca STL');
+  const [newFolderName, setNewFolderName] = useState('Biblioteca Legacy');
   const [pendingFolderSelection, setPendingFolderSelection] = useState(null);
 
   const [uploadForm, setUploadForm] = useState({
@@ -844,7 +844,7 @@ export default function App() {
         ? `Vitrine: ${selectedCategory}${searchInput ? ` (${searchInput})` : ''}`
         : searchInput
           ? `Vitrine: "${searchInput}"`
-          : 'Catálogo Completo Biblioteca STL';
+          : 'Catálogo Completo Biblioteca Legacy';
 
     setShareForm({
       title: defaultTitle,
@@ -1361,7 +1361,7 @@ export default function App() {
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
-        showToast('Bem-vindo à Biblioteca STL!');
+        showToast('Bem-vindo à Biblioteca Legacy!');
       }
     } catch (err) {
       setAuthError(err.message);
@@ -1487,7 +1487,7 @@ export default function App() {
   const handleUploadNewModel = async (e) => {
     e.preventDefault();
     if (!settings.root_folder_id) {
-      showToast('Configure a pasta raiz Biblioteca STL antes de enviar arquivos.', 'error');
+      showToast('Configure a pasta raiz Biblioteca Legacy antes de enviar arquivos.', 'error');
       setFolderPickerOpen(true);
       return;
     }
@@ -2729,7 +2729,7 @@ export default function App() {
           <div className="flex items-center gap-3.5">
             {renderLogo('w-11 h-11')}
             <div>
-              <h1 className="text-2xl font-bold text-[#e4e0d7] tracking-tight">Biblioteca STL</h1>
+              <h1 className="text-2xl font-bold text-[#e4e0d7] tracking-tight">Biblioteca Legacy</h1>
               <p className="text-xs text-[#a39e93]">Catálogo Pessoal &bull; Google Drive + Supabase</p>
             </div>
           </div>
@@ -2772,7 +2772,7 @@ export default function App() {
           <div className="flex items-center gap-2.5">
             {renderLogo('w-9 h-9')}
             <div>
-              <h1 className="font-bold text-base sm:text-lg text-[#e4e0d7] leading-tight tracking-tight">Biblioteca STL</h1>
+              <h1 className="font-bold text-base sm:text-lg text-[#e4e0d7] leading-tight tracking-tight">Biblioteca Legacy</h1>
               <p className="text-[11px] text-[#8c877e] hidden lg:block">Google Drive &bull; Subpastas por Categoria</p>
             </div>
           </div>
@@ -2854,7 +2854,7 @@ export default function App() {
               {!googleConnected ? (
                 <span>Vincule sua conta Google uma única vez para ativar o armazenamento definitivo no Google Drive.</span>
               ) : (
-                <span>Selecione ou crie a pasta raiz <strong>Biblioteca STL</strong> no seu Google Drive.</span>
+                <span>Selecione ou crie a pasta raiz <strong>Biblioteca Legacy</strong> no seu Google Drive.</span>
               )}
             </div>
             <div className="self-end sm:self-auto">
