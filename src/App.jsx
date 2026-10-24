@@ -136,8 +136,10 @@ export default function App() {
   const [orderForm, setOrderForm] = useState({
     clientName: '',
     pieceName: '',
+    customPrice: '',
     deductStockNow: false
   });
+  const [stockEditValues, setStockEditValues] = useState({});
   const [gcodeInfo, setGcodeInfo] = useState('');
 
   const [models, setModels] = useState([]);
@@ -1990,6 +1992,35 @@ export default function App() {
     }
   };
 
+  // Define uma quantidade exata personalizada de estoque (em gramas/ml) para um filamento ou resina
+  const handleSetExactMaterialStock = async (materialId, exactGramsInput) => {
+    if (!supabase) return;
+    const mat = materials.find((m) => m.id === materialId);
+    if (!mat) return;
+
+    const parsedGrams = Number(exactGramsInput);
+    if (isNaN(parsedGrams) || parsedGrams < 0) {
+      showToast('Digite uma quantidade válida em gramas/ml.', 'error');
+      return;
+    }
+
+    const newStock = Number(parsedGrams.toFixed(1));
+    const { error } = await supabase
+      .from('stl_materials')
+      .update({ stock_grams: newStock })
+      .eq('id', materialId);
+
+    if (error) {
+      showToast(`Erro ao definir estoque: ${error.message}`, 'error');
+      return;
+    }
+
+    setMaterials((prev) =>
+      prev.map((m) => (m.id === materialId ? { ...m, stock_grams: newStock } : m))
+    );
+    showToast(`Estoque de "${mat.name} (${mat.color})" definido para ${newStock}g!`);
+  };
+
   // 2. Leitor Automático de arquivo .GCODE (Cura, BambuStudio, OrcaSlicer, PrusaSlicer)
   const handleParseGcodeFile = async (file) => {
     if (!file) return;
@@ -2087,6 +2118,20 @@ export default function App() {
     const selPrint = printers.find((p) => p.id === calcForm.printerId);
     const weightToDeduct = Number(calculationResults.effectiveWeightG.toFixed(1));
 
+    // Se houver valor personalizado válido (> 0), usa ele; caso contrário, usa o valor da calculadora
+    const hasCustomPrice =
+      orderForm.customPrice !== '' &&
+      orderForm.customPrice !== null &&
+      !isNaN(Number(orderForm.customPrice)) &&
+      Number(orderForm.customPrice) > 0;
+
+    const finalSalePrice = hasCustomPrice
+      ? Number(Number(orderForm.customPrice).toFixed(2))
+      : Number(calculationResults.suggestedPrice.toFixed(2));
+
+    const finalCost = Number(calculationResults.totalCost.toFixed(2));
+    const finalNetProfit = Number((finalSalePrice - finalCost).toFixed(2));
+
     try {
       const { data: created, error } = await supabase
         .from('stl_orders')
@@ -2099,9 +2144,9 @@ export default function App() {
           printer_label: selPrint ? selPrint.name : 'Padrão',
           weight_grams: weightToDeduct,
           print_hours: Number(calcForm.printHours) || 0,
-          total_cost: Number(calculationResults.totalCost.toFixed(2)),
-          suggested_price: Number(calculationResults.suggestedPrice.toFixed(2)),
-          net_profit: Number(calculationResults.netProfit.toFixed(2)),
+          total_cost: finalCost,
+          suggested_price: finalSalePrice,
+          net_profit: finalNetProfit,
           status: orderForm.deductStockNow ? 'Aprovado / Imprimindo' : 'Orçamento',
           stock_deducted: Boolean(orderForm.deductStockNow && selMat)
         })
@@ -2114,14 +2159,14 @@ export default function App() {
         await handleAdjustMaterialStock(
           selMat.id,
           -weightToDeduct,
-          `Orçamento salvo e baixa de ${weightToDeduct}g aplicada no estoque!`
+          `Orçamento salvo por R$ ${finalSalePrice.toFixed(2)} e baixa de ${weightToDeduct}g aplicada!`
         );
       } else {
-        showToast('Orçamento salvo no Histórico de Pedidos!');
+        showToast(`Orçamento salvo no Histórico por R$ ${finalSalePrice.toFixed(2)}!`);
       }
 
       setOrders((prev) => [created, ...prev]);
-      setOrderForm({ clientName: '', pieceName: '', deductStockNow: false });
+      setOrderForm({ clientName: '', pieceName: '', customPrice: '', deductStockNow: false });
     } catch (err) {
       showToast(`Erro ao salvar pedido: ${err.message}`, 'error');
     }
@@ -3768,7 +3813,7 @@ export default function App() {
                 <h3 className="font-bold text-[#e4e0d7] text-base">Salvar Orçamento / Registrar Pedido</h3>
               </div>
 
-              <form onSubmit={handleSaveOrderFromCalculator} className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+              <form onSubmit={handleSaveOrderFromCalculator} className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
                 <div>
                   <label className="block text-xs text-[#a39e93] mb-1">Nome do Cliente / Projeto *</label>
                   <input
@@ -3791,20 +3836,41 @@ export default function App() {
                     className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
                   />
                 </div>
+                <div>
+                  <label className="block text-xs text-[#c89d66] font-semibold mb-1">
+                    Valor Personalizado R$ (Opcional)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={orderForm.customPrice}
+                    onChange={(e) => setOrderForm({ ...orderForm, customPrice: e.target.value })}
+                    placeholder={`Padrão: R$ ${calculationResults.suggestedPrice.toFixed(2)}`}
+                    className="w-full px-3 py-2 bg-[#000000] border border-[#c89d66]/50 rounded-xl text-sm text-[#e4e0d7] placeholder-[#6e6a61]"
+                  />
+                </div>
                 <button
                   type="submit"
                   className="py-2 px-4 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] font-bold rounded-xl text-xs h-[38px] cursor-pointer transition"
                 >
-                  Salvar no Histórico (R$ {calculationResults.suggestedPrice.toFixed(2)})
+                  Salvar (R${' '}
+                  {orderForm.customPrice && Number(orderForm.customPrice) > 0
+                    ? Number(orderForm.customPrice).toFixed(2)
+                    : calculationResults.suggestedPrice.toFixed(2)}
+                  )
                 </button>
-                <label className="sm:col-span-3 flex items-center gap-2 text-xs text-[#a39e93] cursor-pointer pt-1">
+
+                <label className="sm:col-span-4 flex items-center gap-2 text-xs text-[#a39e93] cursor-pointer pt-1">
                   <input
                     type="checkbox"
                     checked={orderForm.deductStockNow}
                     onChange={(e) => setOrderForm({ ...orderForm, deductStockNow: e.target.checked })}
                     className="w-4 h-4 accent-[#e4e0d7]"
                   />
-                  <span>Já dar baixa imediata de {calculationResults.effectiveWeightG.toFixed(1)}g no estoque do material ao salvar</span>
+                  <span>
+                    Já dar baixa imediata de {calculationResults.effectiveWeightG.toFixed(1)}g no estoque do material ao salvar
+                  </span>
                 </label>
               </form>
 
@@ -3843,10 +3909,10 @@ export default function App() {
                             value={ord.status}
                             onChange={(e) => handleUpdateOrderStatus(ord, e.target.value)}
                             className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border cursor-pointer ${ord.status === 'Concluído / Pago'
-                                ? 'bg-[#4d7c5b]/20 text-[#70a37f] border-[#4d7c5b]/40'
-                                : ord.status === 'Aprovado / Imprimindo'
-                                  ? 'bg-[#c89d66]/20 text-[#c89d66] border-[#c89d66]/40'
-                                  : 'bg-[#141413] text-[#a39e93] border-[#262522]'
+                              ? 'bg-[#4d7c5b]/20 text-[#70a37f] border-[#4d7c5b]/40'
+                              : ord.status === 'Aprovado / Imprimindo'
+                                ? 'bg-[#c89d66]/20 text-[#c89d66] border-[#c89d66]/40'
+                                : 'bg-[#141413] text-[#a39e93] border-[#262522]'
                               }`}
                           >
                             <option value="Orçamento" className="bg-[#0a0a0a] text-[#e4e0d7]">Orçamento</option>
@@ -3864,6 +3930,102 @@ export default function App() {
                         </div>
                       </div>
                     ))}
+                  </div>
+                )}
+              </div>
+              {/* ÁREA DE CONTROLE PERSONALIZADO DE ESTOQUE DE FILAMENTOS E RESINAS */}
+              <div className="bg-[#0a0a0a] border border-[#262522] rounded-2xl p-6 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#1c1b19] pb-3">
+                  <div>
+                    <h3 className="font-bold text-[#e4e0d7] text-base">Controle de Estoque de Filamentos e Resinas</h3>
+                    <p className="text-xs text-[#8c877e]">
+                      Digite a quantidade exata atual em gramas/ml ou adicione/remova quantidades personalizadas.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setNewMaterialModal(true)}
+                    className="px-3.5 py-2 bg-[#141413] hover:bg-[#1f1e1c] text-[#e4e0d7] border border-[#262522] rounded-xl text-xs font-semibold cursor-pointer self-start sm:self-auto"
+                  >
+                    + Cadastrar Material
+                  </button>
+                </div>
+
+                {materials.length === 0 ? (
+                  <p className="text-xs text-[#6e6a61] py-4 text-center">Nenhum filamento ou resina cadastrado.</p>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {materials.map((m) => {
+                      const currentStock = Number(m.stock_grams ?? 1000);
+                      const isLow = currentStock < 200;
+                      const pct = Math.min(100, Math.max(0, (currentStock / 1000) * 100));
+                      const inputVal =
+                        stockEditValues[m.id] !== undefined ? stockEditValues[m.id] : String(currentStock);
+
+                      return (
+                        <div key={m.id} className="p-4 rounded-xl bg-[#000000] border border-[#262522] space-y-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <span className="px-2 py-0.5 rounded bg-[#141413] border border-[#262522] text-[10px] text-[#a39e93]">
+                                {m.type}
+                              </span>
+                              <h4 className="font-bold text-sm text-[#e4e0d7] mt-1">
+                                {m.name} <span className="text-[#c89d66]">({m.color})</span>
+                              </h4>
+                              <p className="text-[11px] text-[#8c877e]">R$ {Number(m.price_per_unit).toFixed(2)} / kg</p>
+                            </div>
+                            <div className="text-right">
+                              <span className="text-[10px] text-[#8c877e] block">Saldo Atual</span>
+                              <strong className={`text-base ${isLow ? 'text-[#d96b68]' : 'text-[#70a37f]'}`}>
+                                {currentStock}g
+                              </strong>
+                            </div>
+                          </div>
+
+                          {/* Barra de progresso visual (base 1kg = 1000g) */}
+                          <div className="w-full h-2 bg-[#141413] rounded-full overflow-hidden">
+                            <div
+                              className={`h-full transition-all ${isLow ? 'bg-[#d96b68]' : 'bg-[#70a37f]'}`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+
+                          {/* Campo para definir a quantidade personalizada exata */}
+                          <div className="flex items-center gap-2 pt-1">
+                            <input
+                              type="number"
+                              step="1"
+                              min="0"
+                              value={inputVal}
+                              onChange={(e) =>
+                                setStockEditValues((prev) => ({ ...prev, [m.id]: e.target.value }))
+                              }
+                              placeholder="Qtd em gramas"
+                              className="flex-1 px-3 py-1.5 bg-[#0a0a0a] border border-[#262522] rounded-lg text-xs text-[#e4e0d7]"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleSetExactMaterialStock(m.id, inputVal)}
+                              className="px-3 py-1.5 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-lg text-xs font-bold cursor-pointer shrink-0 transition"
+                            >
+                              Definir Qtd (g)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const nextVal = currentStock + 1000;
+                                setStockEditValues((prev) => ({ ...prev, [m.id]: String(nextVal) }));
+                                handleAdjustMaterialStock(m.id, 1000);
+                              }}
+                              className="px-2.5 py-1.5 bg-[#141413] hover:bg-[#1f1e1c] text-[#c89d66] border border-[#262522] rounded-lg text-xs font-bold cursor-pointer shrink-0"
+                              title="Adicionar +1 carretel (1000g)"
+                            >
+                              +1kg
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
