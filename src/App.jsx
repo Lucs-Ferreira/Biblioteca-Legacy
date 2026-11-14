@@ -2228,12 +2228,8 @@ export default function App() {
 
     // 1. Mensagem principal do pedido e valor
     const msg1 = encodeURIComponent(
-      `Olá *${order.client_name}*! Segue o resumo do seu pedido na *Biblioteca STL*:\n\n📦 *Item:* ${order.piece_name}\n💰 *Valor Total:* R$ ${priceFormatted}\n\nPara prosseguirmos, por favor realize o pagamento via Pix utilizando a chave abaixo:`
-    );
-
-    // 2. Mensagem separada apenas com a Chave Pix
-    const msg2 = encodeURIComponent(
-      `🔑 *Chave Pix:* \`${pixKey}\`\n\n*(Toque na chave acima para copiar no celular)*. Assim que enviar o comprovante, me avise por aqui! Obrigado!`
+      `Olá *${order.client_name}*! Segue o resumo do seu pedido na *Legacy 3D*:\n\n *Item:* ${order.piece_name}\n *Valor Total:* R$ ${priceFormatted}\n\nPara prosseguirmos, por favor realize o pagamento via Pix utilizando a chave abaixo:\n
+      *Chave Pix:* \`${pixKey}\`\n\n*(Toque na chave acima para copiar no celular)*. Assim que enviar o comprovante, me avise por aqui! Obrigado!`
     );
 
     // Abre o WhatsApp com a primeira mensagem
