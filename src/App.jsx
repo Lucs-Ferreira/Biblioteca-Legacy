@@ -108,6 +108,7 @@ export default function App() {
     default_failure_rate: 5,
     default_post_processing_pct: 15,
     labor_hourly_rate: 25.00,
+    pix_key: '',
     google_refresh_token: ''
   });
 
@@ -516,6 +517,7 @@ export default function App() {
           default_failure_rate: cfg.default_failure_rate ?? 5,
           default_post_processing_pct: cfg.default_post_processing_pct ?? 15,
           labor_hourly_rate: cfg.labor_hourly_rate ?? 25.00,
+          pix_key: cfg.pix_key || '',
           google_refresh_token: validSavedRefreshToken
         });
 
