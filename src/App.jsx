@@ -136,6 +136,7 @@ export default function App() {
   const [orderForm, setOrderForm] = useState({
     clientName: '',
     pieceName: '',
+    clientWhatsapp: '',
     customPrice: '',
     deductStockNow: false
   });
@@ -2139,6 +2140,7 @@ export default function App() {
           user_id: session.user.id,
           client_name: orderForm.clientName.trim(),
           piece_name: orderForm.pieceName.trim(),
+          client_whatsapp: orderForm.clientWhatsapp.trim(), // <-- Adicionado
           material_id: selMat?.id || null,
           material_label: selMat ? `${selMat.type}: ${selMat.name} (${selMat.color})` : 'Não informado',
           printer_label: selPrint ? selPrint.name : 'Padrão',
@@ -2166,7 +2168,7 @@ export default function App() {
       }
 
       setOrders((prev) => [created, ...prev]);
-      setOrderForm({ clientName: '', pieceName: '', customPrice: '', deductStockNow: false });
+      setOrderForm({ clientName: '', pieceName: '', clientWhatsapp: '', customPrice: '', deductStockNow: false });
     } catch (err) {
       showToast(`Erro ao salvar pedido: ${err.message}`, 'error');
     }
@@ -2211,6 +2213,35 @@ export default function App() {
         o.id === order.id ? { ...o, status: newStatus, stock_deducted: o.stock_deducted || shouldDeductNow } : o
       )
     );
+  };
+
+  // Função para enviar mensagem de cobrança no WhatsApp com o item, valor e Chave Pix em mensagem separada
+  const handleSendWhatsAppBilling = (order) => {
+    const rawPhone = (order.client_whatsapp || '').replace(/\D/g, '');
+    if (!rawPhone) {
+      showToast('Este pedido não possui um número de WhatsApp cadastrado.', 'error');
+      return;
+    }
+
+    const pixKey = settings.pix_key || 'Sua Chave Pix não configurada (vá em Configurações)';
+    const priceFormatted = Number(order.suggested_price || 0).toFixed(2);
+
+    // 1. Mensagem principal do pedido e valor
+    const msg1 = encodeURIComponent(
+      `Olá *${order.client_name}*! Segue o resumo do seu pedido na *Biblioteca STL*:\n\n📦 *Item:* ${order.piece_name}\n💰 *Valor Total:* R$ ${priceFormatted}\n\nPara prosseguirmos, por favor realize o pagamento via Pix utilizando a chave abaixo:`
+    );
+
+    // 2. Mensagem separada apenas com a Chave Pix
+    const msg2 = encodeURIComponent(
+      `🔑 *Chave Pix:* \`${pixKey}\`\n\n*(Toque na chave acima para copiar no celular)*. Assim que enviar o comprovante, me avise por aqui! Obrigado!`
+    );
+
+    // Abre o WhatsApp com a primeira mensagem
+    window.open(`https://wa.me/55${rawPhone}?text=${msg1}`, '_blank');
+
+    // Copia a Chave Pix para a área de transferência para facilitar colar na segunda mensagem
+    navigator.clipboard.writeText(pixKey).catch(() => { });
+    showToast('Mensagem enviada e Chave Pix copiada para a área de transferência!');
   };
 
   const handleDeleteOrder = async (id) => {
@@ -3837,6 +3868,16 @@ export default function App() {
                   />
                 </div>
                 <div>
+                  <label className="block text-xs text-[#a39e93] mb-1">WhatsApp do Solicitante</label>
+                  <input
+                    type="text"
+                    value={orderForm.clientWhatsapp}
+                    onChange={(e) => setOrderForm({ ...orderForm, clientWhatsapp: e.target.value })}
+                    placeholder="Ex: 31999999999"
+                    className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
+                  />
+                </div>
+                <div>
                   <label className="block text-xs text-[#c89d66] font-semibold mb-1">
                     Valor Personalizado R$ (Opcional)
                   </label>
@@ -3907,18 +3948,39 @@ export default function App() {
                         <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
                           <select
                             value={ord.status}
-                            onChange={(e) => handleUpdateOrderStatus(ord, e.target.value)}
-                            className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border cursor-pointer ${ord.status === 'Concluído / Pago'
-                              ? 'bg-[#4d7c5b]/20 text-[#70a37f] border-[#4d7c5b]/40'
-                              : ord.status === 'Aprovado / Imprimindo'
-                                ? 'bg-[#c89d66]/20 text-[#c89d66] border-[#c89d66]/40'
-                                : 'bg-[#141413] text-[#a39e93] border-[#262522]'
+                            onChange={(e) => {
+                              const newSt = e.target.value;
+                              handleUpdateOrderStatus(ord, newSt);
+                              if (newSt === 'Aguardando Pagamento') {
+                                handleSendWhatsAppBilling(ord);
+                              }
+                            }}
+                            className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border cursor-pointer ${ord.status === 'Entregue'
+                              ? 'bg-[#4d7c5b]/30 text-[#70a37f] border-[#4d7c5b]/50'
+                              : ord.status === 'Concluído / Pago'
+                                ? 'bg-[#4d7c5b]/20 text-[#70a37f] border-[#4d7c5b]/40'
+                                : ord.status === 'Aguardando Pagamento'
+                                  ? 'bg-[#c89d66]/30 text-[#c89d66] border-[#c89d66]/50'
+                                  : 'bg-[#141413] text-[#a39e93] border-[#262522]'
                               }`}
                           >
                             <option value="Orçamento" className="bg-[#0a0a0a] text-[#e4e0d7]">Orçamento</option>
+                            <option value="Aguardando Pagamento" className="bg-[#0a0a0a] text-[#e4e0d7]">Aguardando Pagamento</option>
                             <option value="Aprovado / Imprimindo" className="bg-[#0a0a0a] text-[#e4e0d7]">Aprovado / Imprimindo</option>
                             <option value="Concluído / Pago" className="bg-[#0a0a0a] text-[#e4e0d7]">Concluído / Pago</option>
+                            <option value="Entregue" className="bg-[#0a0a0a] text-[#e4e0d7]">Entregue</option>
                           </select>
+
+                          {ord.client_whatsapp && (
+                            <button
+                              type="button"
+                              onClick={() => handleSendWhatsAppBilling(ord)}
+                              className="px-2.5 py-1.5 bg-[#25D366]/20 text-[#25D366] border border-[#25D366]/40 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer"
+                              title="Enviar Cobrança no WhatsApp com Chave Pix"
+                            >
+                              <span>WhatsApp</span>
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => handleDeleteOrder(ord.id)}
@@ -4112,6 +4174,16 @@ export default function App() {
                 <div>
                   <label className="block text-xs font-medium text-[#a39e93] mb-1">Adicional Pós-Processamento (%)</label>
                   <input type="number" value={settings.default_post_processing_pct} onChange={(e) => handleSaveGeneralSettings({ default_post_processing_pct: Number(e.target.value) })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Sua Chave Pix (para cobrança via WhatsApp)</label>
+                  <input
+                    type="text"
+                    value={settings.pix_key || ''}
+                    onChange={(e) => handleSaveGeneralSettings({ pix_key: e.target.value })}
+                    placeholder="Ex: seu-email@exemplo.com ou CPF/CNPJ"
+                    className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]"
+                  />
                 </div>
               </div>
             </div>
