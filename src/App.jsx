@@ -168,7 +168,14 @@ export default function App() {
   });
   const [creatingShareLink, setCreatingShareLink] = useState(false);
 
-  const [activeTab, setActiveTab] = useState('catalogo');
+  const [activeTab, setActiveTab] = useState(() => localStorage.getItem('stl_active_tab') || 'catalogo');
+
+  // Salva a aba atual sempre que o usuário trocar de menu
+  useEffect(() => {
+    if (!shareIdFromUrl) {
+      localStorage.setItem('stl_active_tab', activeTab);
+    }
+  }, [activeTab, shareIdFromUrl]);
   const [searchInput, setSearchInput] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('Todas');
@@ -248,6 +255,11 @@ export default function App() {
   useEffect(() => {
     setCurrentPage(1);
   }, [selectedCategory, itemsPerPage, visitorSearch, sortBy, onlyGhostFilter]);
+
+  // Rola a tela suavemente para o topo sempre que trocar de página no catálogo
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [currentPage]);
 
   const allCategories = useMemo(() => {
     const custom = Array.isArray(settings.custom_categories) ? settings.custom_categories : [];
