@@ -1445,6 +1445,7 @@ export default function App() {
         default_failure_rate: updated.default_failure_rate,
         default_post_processing_pct: updated.default_post_processing_pct,
         labor_hourly_rate: updated.labor_hourly_rate,
+        pix_key: updated.pix_key,
         updated_at: new Date().toISOString()
       });
 
@@ -1480,6 +1481,7 @@ export default function App() {
         default_failure_rate: merged.default_failure_rate,
         default_post_processing_pct: merged.default_post_processing_pct,
         labor_hourly_rate: merged.labor_hourly_rate,
+        pix_key: merged.pix_key,
         google_refresh_token: merged.google_refresh_token,
         updated_at: new Date().toISOString()
       });
