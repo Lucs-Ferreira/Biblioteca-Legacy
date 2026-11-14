@@ -1431,6 +1431,8 @@ export default function App() {
       root_folder_name: folderName,
       organize_by_subfolders: true
     };
+
+    // Salva permanentemente no Supabase para sincronizar entre PC e Celular
     const { error } = await supabase
       .from('user_settings')
       .upsert({
@@ -1439,6 +1441,10 @@ export default function App() {
         root_folder_name: folderName,
         organize_by_subfolders: true,
         max_upload_size_mb: updated.max_upload_size_mb,
+        energy_cost_kwh: updated.energy_cost_kwh,
+        default_failure_rate: updated.default_failure_rate,
+        default_post_processing_pct: updated.default_post_processing_pct,
+        labor_hourly_rate: updated.labor_hourly_rate,
         updated_at: new Date().toISOString()
       });
 
@@ -1451,7 +1457,7 @@ export default function App() {
     awaitingLoadedRef.current = false;
     setPendingFolderSelection(null);
     setFolderPickerOpen(false);
-    showToast(`Pasta raiz "${folderName}" vinculada! Montando subpastas...`);
+    showToast(`Pasta raiz "${folderName}" vinculada e sincronizada na nuvem!`);
 
     await handleSyncAllCategorySubfolders(folderId, false);
   };
@@ -1460,6 +1466,8 @@ export default function App() {
     const merged = { ...settings, ...newPartial };
     setSettings(merged);
     if (!supabase || !session?.user) return;
+
+    // Salva na nuvem para refletir no celular e em outros dispositivos
     await supabase
       .from('user_settings')
       .upsert({
@@ -1472,9 +1480,11 @@ export default function App() {
         default_failure_rate: merged.default_failure_rate,
         default_post_processing_pct: merged.default_post_processing_pct,
         labor_hourly_rate: merged.labor_hourly_rate,
+        google_refresh_token: merged.google_refresh_token,
         updated_at: new Date().toISOString()
       });
-    showToast('Configurações atualizadas!');
+
+    showToast('Configurações atualizadas e salvas na nuvem!');
   };
 
   const uploadMultipleImagesToSupabase = async (filesArray) => {
