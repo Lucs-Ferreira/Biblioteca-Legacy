@@ -3884,11 +3884,14 @@ export default function App() {
                           onChange={(e) => handleUpdateCalcMaterial(idx, 'materialId', e.target.value)}
                           className="flex-1 w-full px-3 py-2 bg-[#0a0a0a] border border-[#262522] rounded-xl text-xs text-[#e4e0d7]"
                         >
-                          {materials.map((m) => (
-                            <option key={m.id} value={m.id}>
-                              {m.type}: {m.name} ({m.color}) - R$ {m.price_per_unit}/kg
-                            </option>
-                          ))}
+                          {materials.map((m) => {
+                            const stockGrams = Number(m.stock_grams ?? 1000);
+                            return (
+                              <option key={m.id} value={m.id}>
+                                {m.type}: {m.name} ({m.color}) — R$ {m.price_per_unit}/kg | Disp: {stockGrams}g
+                              </option>
+                            );
+                          })}
                         </select>
                         <div className="flex items-center gap-2 w-full sm:w-auto">
                           <input
@@ -4141,12 +4144,12 @@ export default function App() {
                               }
                             }}
                             className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border cursor-pointer ${ord.status === 'Entregue'
-                                ? 'bg-[#4d7c5b]/30 text-[#70a37f] border-[#4d7c5b]/50'
-                                : ord.status === 'Concluído / Pago'
-                                  ? 'bg-[#4d7c5b]/20 text-[#70a37f] border-[#4d7c5b]/40'
-                                  : ord.status === 'Aguardando Pagamento'
-                                    ? 'bg-[#c89d66]/30 text-[#c89d66] border-[#c89d66]/50'
-                                    : 'bg-[#141413] text-[#a39e93] border-[#262522]'
+                              ? 'bg-[#4d7c5b]/30 text-[#70a37f] border-[#4d7c5b]/50'
+                              : ord.status === 'Concluído / Pago'
+                                ? 'bg-[#4d7c5b]/20 text-[#70a37f] border-[#4d7c5b]/40'
+                                : ord.status === 'Aguardando Pagamento'
+                                  ? 'bg-[#c89d66]/30 text-[#c89d66] border-[#c89d66]/50'
+                                  : 'bg-[#141413] text-[#a39e93] border-[#262522]'
                               }`}
                           >
                             <option value="Orçamento" className="bg-[#0a0a0a] text-[#e4e0d7]">Orçamento</option>
