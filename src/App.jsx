@@ -247,6 +247,29 @@ export default function App() {
   const [newPrinterModal, setNewPrinterModal] = useState(false);
   const [printForm, setPrintForm] = useState({ name: '', power_watts: 150, printer_value: 2000, lifespan_hours: 5000 });
 
+  const [orderSearch, setOrderSearch] = useState('');
+  const [orderCurrentPage, setOrderCurrentPage] = useState(1);
+  const ordersPerPage = 5;
+
+  const filteredOrders = useMemo(() => {
+    const q = orderSearch.trim().toLowerCase();
+    if (!q) return orders;
+    return orders.filter(
+      (o) =>
+        o.piece_name?.toLowerCase().includes(q) ||
+        o.client_name?.toLowerCase().includes(q) ||
+        o.status?.toLowerCase().includes(q)
+    );
+  }, [orders, orderSearch]);
+
+  const totalOrderPages = Math.max(1, Math.ceil(filteredOrders.length / ordersPerPage));
+  const safeOrderPage = Math.min(orderCurrentPage, totalOrderPages);
+
+  const paginatedOrders = useMemo(() => {
+    const start = (safeOrderPage - 1) * ordersPerPage;
+    return filteredOrders.slice(start, start + ordersPerPage);
+  }, [filteredOrders, safeOrderPage]);
+
   const showToast = (message, type = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 6000);
@@ -4047,16 +4070,40 @@ export default function App() {
                 </label>
               </form>
 
-              {/* Tabela de Histórico de Orçamentos e Pedidos */}
-              <div className="space-y-2 pt-3 border-t border-[#1c1b19]">
-                <h4 className="text-xs font-semibold text-[#a39e93] uppercase tracking-wider">
-                  Histórico de Orçamentos e Pedidos ({orders.length})
-                </h4>
-                {orders.length === 0 ? (
-                  <p className="text-xs text-[#6e6a61] py-4 text-center">Nenhum orçamento ou pedido salvo ainda.</p>
+              {/* Tabela de Histórico de Orçamentos e Pedidos com Busca e Paginação */}
+              <div className="space-y-3 pt-4 border-t border-[#1c1b19]">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <h4 className="text-xs font-semibold text-[#a39e93] uppercase tracking-wider">
+                    Histórico de Orçamentos e Pedidos ({filteredOrders.length})
+                  </h4>
+
+                  {/* Barra de Pesquisa de Orçamentos */}
+                  <div className="relative w-full sm:w-64">
+                    <Search className="w-3.5 h-3.5 text-[#8c877e] absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={orderSearch}
+                      onChange={(e) => { setOrderSearch(e.target.value); setOrderCurrentPage(1); }}
+                      placeholder="Filtrar por cliente, peça ou status..."
+                      className="w-full pl-9 pr-8 py-1.5 bg-[#000000] border border-[#262522] rounded-xl text-xs text-[#e4e0d7] placeholder-[#6e6a61] focus:outline-none focus:border-[#e4e0d7]"
+                    />
+                    {orderSearch && (
+                      <button
+                        type="button"
+                        onClick={() => { setOrderSearch(''); setOrderCurrentPage(1); }}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#8c877e] hover:text-white"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {paginatedOrders.length === 0 ? (
+                  <p className="text-xs text-[#6e6a61] py-4 text-center">Nenhum orçamento ou pedido encontrado.</p>
                 ) : (
-                  <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
-                    {orders.map((ord) => (
+                  <div className="space-y-2">
+                    {paginatedOrders.map((ord) => (
                       <div
                         key={ord.id}
                         className="p-3.5 rounded-xl bg-[#000000] border border-[#262522] flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
@@ -4088,12 +4135,12 @@ export default function App() {
                               }
                             }}
                             className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border cursor-pointer ${ord.status === 'Entregue'
-                              ? 'bg-[#4d7c5b]/30 text-[#70a37f] border-[#4d7c5b]/50'
-                              : ord.status === 'Concluído / Pago'
-                                ? 'bg-[#4d7c5b]/20 text-[#70a37f] border-[#4d7c5b]/40'
-                                : ord.status === 'Aguardando Pagamento'
-                                  ? 'bg-[#c89d66]/30 text-[#c89d66] border-[#c89d66]/50'
-                                  : 'bg-[#141413] text-[#a39e93] border-[#262522]'
+                                ? 'bg-[#4d7c5b]/30 text-[#70a37f] border-[#4d7c5b]/50'
+                                : ord.status === 'Concluído / Pago'
+                                  ? 'bg-[#4d7c5b]/20 text-[#70a37f] border-[#4d7c5b]/40'
+                                  : ord.status === 'Aguardando Pagamento'
+                                    ? 'bg-[#c89d66]/30 text-[#c89d66] border-[#c89d66]/50'
+                                    : 'bg-[#141413] text-[#a39e93] border-[#262522]'
                               }`}
                           >
                             <option value="Orçamento" className="bg-[#0a0a0a] text-[#e4e0d7]">Orçamento</option>
@@ -4108,7 +4155,6 @@ export default function App() {
                               type="button"
                               onClick={() => handleSendWhatsAppBilling(ord)}
                               className="px-2.5 py-1.5 bg-[#25D366]/20 text-[#25D366] border border-[#25D366]/40 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer"
-                              title="Enviar Cobrança no WhatsApp com Chave Pix"
                             >
                               <span>WhatsApp</span>
                             </button>
@@ -4124,6 +4170,31 @@ export default function App() {
                         </div>
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {/* Controles de Paginação dos Orçamentos (5 por página) */}
+                {totalOrderPages > 1 && (
+                  <div className="flex items-center justify-between pt-2 text-xs text-[#8c877e]">
+                    <span>Página {safeOrderPage} de {totalOrderPages}</span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        disabled={safeOrderPage === 1}
+                        onClick={() => setOrderCurrentPage((p) => Math.max(1, p - 1))}
+                        className="p-1.5 rounded-lg bg-[#000000] border border-[#262522] text-[#a39e93] disabled:opacity-35 cursor-pointer"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={safeOrderPage === totalOrderPages}
+                        onClick={() => setOrderCurrentPage((p) => Math.min(totalOrderPages, p + 1))}
+                        className="p-1.5 rounded-lg bg-[#000000] border border-[#262522] text-[#a39e93] disabled:opacity-35 cursor-pointer"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
