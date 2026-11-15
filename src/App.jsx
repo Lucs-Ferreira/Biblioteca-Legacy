@@ -2232,6 +2232,12 @@ export default function App() {
 
       setOrders((prev) => [created, ...prev]);
       setOrderForm({ clientName: '', pieceName: '', clientWhatsapp: '', customPrice: '', deductStockNow: false });
+      // Reseta os materiais da calculadora para o estado inicial vazio
+      setCalcForm((prev) => ({
+        ...prev,
+        multiMaterials: [],
+        weightGrams: 100
+      }));
     } catch (err) {
       showToast(`Erro ao salvar pedido: ${err.message}`, 'error');
     }
@@ -2928,11 +2934,11 @@ export default function App() {
             <button onClick={() => setActiveTab('calculadora')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'calculadora' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
               <Calculator className="w-4 h-4" /><span>Calculadora</span>
             </button>
-            <button onClick={() => setActiveTab('configuracoes')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
-              <Settings className="w-4 h-4" /><span>Config</span>
-            </button>
             <button onClick={() => setActiveTab('timers')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'timers' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
               <Clock className="w-4 h-4" /><span>Timers</span>
+            </button>
+            <button onClick={() => setActiveTab('configuracoes')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
+              <Settings className="w-4 h-4" /><span>Config</span>
             </button>
 
             <button
@@ -2969,7 +2975,7 @@ export default function App() {
             <button onClick={() => { setActiveTab('calculadora'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'calculadora' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
               <Calculator className="w-4 h-4" /><span>Calculadora de Gastos</span>
             </button>
-            <button onClick={() => { setActiveTab('timers'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'timers' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93]'}`}>
+            <button onClick={() => { setActiveTab('timers'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'timers' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
               <Clock className="w-4 h-4" /><span>Timers</span>
             </button>
             <button onClick={() => { setActiveTab('configuracoes'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
