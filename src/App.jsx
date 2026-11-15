@@ -4249,7 +4249,7 @@ export default function App() {
             </div>
           </div>
         )}
-        {activeTab === 'timers' && <TimersView />}
+        {activeTab === 'timers' && <TimersView supabase={supabase} session={session} />}
       </main>
 
       {/* MODAL MUDAR CATEGORIA EM LOTE */}

@@ -74,12 +74,28 @@ export default function TimersView({ supabase, session }) {
 
     const handleAddTimer = async (e) => {
         e.preventDefault();
+
+        // 1. Valida se o nome foi preenchido
         if (!newName.trim()) {
-            alert('Digite o nome do timer.');
+            alert('Por favor, digite o nome do timer.');
             return;
         }
-        if (!supabase || !session?.user) {
-            alert('Usuário não autenticado.');
+
+        // 2. Valida se o cliente Supabase está ativo
+        if (!supabase) {
+            alert('Erro: O cliente do Supabase não foi inicializado.');
+            return;
+        }
+
+        // 3. Tenta pegar a sessão atual direto do Supabase caso a prop venha vazia
+        let currentUserId = session?.user?.id;
+        if (!currentUserId) {
+            const { data: { session: activeSession } } = await supabase.auth.getSession();
+            currentUserId = activeSession?.user?.id;
+        }
+
+        if (!currentUserId) {
+            alert('Sessão expirada ou usuário não logado. Por favor, faça login novamente.');
             return;
         }
 
@@ -90,7 +106,7 @@ export default function TimersView({ supabase, session }) {
             const { data, error } = await supabase
                 .from('stl_timers')
                 .insert({
-                    user_id: session.user.id,
+                    user_id: currentUserId,
                     name: newName.trim(),
                     total_seconds: totalSeconds,
                     time_left: totalSeconds,
@@ -105,7 +121,7 @@ export default function TimersView({ supabase, session }) {
             setNewName('');
             setNewMinutes(5);
         } catch (err) {
-            console.error('Erro ao criar timer:', err);
+            console.error('Erro detalhado ao criar timer:', err);
             alert(`Erro ao adicionar timer: ${err.message}`);
         } finally {
             setLoading(false);
@@ -258,8 +274,8 @@ export default function TimersView({ supabase, session }) {
                                         type="button"
                                         onClick={() => toggleRun(timer)}
                                         className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition ${timer.is_running
-                                                ? 'bg-[#141413] text-[#e4e0d7] border border-[#262522]'
-                                                : 'bg-[#e4e0d7] text-[#000000]'
+                                            ? 'bg-[#141413] text-[#e4e0d7] border border-[#262522]'
+                                            : 'bg-[#e4e0d7] text-[#000000]'
                                             }`}
                                     >
                                         {timer.is_running ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
