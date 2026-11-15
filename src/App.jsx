@@ -9,6 +9,7 @@ import {
   Copy, Link2, Images, ListOrdered, CheckSquare, Square, ArrowUpDown,
   FileWarning, Layers, FileCode, ClipboardList
 } from 'lucide-react';
+import TimersView from './TimersView';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
@@ -2850,6 +2851,9 @@ export default function App() {
             <button onClick={() => setActiveTab('configuracoes')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
               <Settings className="w-4 h-4" /><span>Config</span>
             </button>
+            <button onClick={() => setActiveTab('timers')} className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTab === 'timers' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93] hover:text-[#e4e0d7] hover:bg-[#121211]'}`}>
+              <Clock className="w-4 h-4" /><span>Timers</span>
+            </button>
 
             <button
               onClick={() => supabase.auth.signOut()}
@@ -2884,6 +2888,9 @@ export default function App() {
             </button>
             <button onClick={() => { setActiveTab('calculadora'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'calculadora' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
               <Calculator className="w-4 h-4" /><span>Calculadora de Gastos</span>
+            </button>
+            <button onClick={() => { setActiveTab('timers'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'timers' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#a39e93]'}`}>
+              <Clock className="w-4 h-4" /><span>Timers</span>
             </button>
             <button onClick={() => { setActiveTab('configuracoes'); setMobileMenuOpen(false); }} className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2.5 ${activeTab === 'configuracoes' ? 'bg-[#e4e0d7] text-[#000000]' : 'text-[#e4e0d7]'}`}>
               <Settings className="w-4 h-4" /><span>Configurações</span>
@@ -4241,6 +4248,7 @@ export default function App() {
             </div>
           </div>
         )}
+        {activeTab === 'timers' && <TimersView />}
       </main>
 
       {/* MODAL MUDAR CATEGORIA EM LOTE */}
