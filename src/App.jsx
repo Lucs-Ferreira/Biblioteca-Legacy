@@ -7,7 +7,8 @@ import {
   LogOut, FolderPlus, Tag, Calculator, Menu, Filter, ArrowRight,
   ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Share2,
   Copy, Link2, Images, ListOrdered, CheckSquare, Square, ArrowUpDown,
-  FileWarning, Layers, FileCode, ClipboardList
+  FileWarning, Layers, FileCode, ClipboardList,
+  Clock, Clock2, Play, Pause, RotateCcw
 } from 'lucide-react';
 import TimersView from './TimersView';
 
