@@ -132,6 +132,7 @@ export default function App() {
     printerId: '',
     materialId: '',
     weightGrams: 100,
+    multiMaterials: [],
     printHours: 5,
     failureRate: 5,
     washed: true,
@@ -2147,11 +2148,13 @@ export default function App() {
       return;
     }
 
-    const selMat = materials.find((m) => m.id === calcForm.materialId);
     const selPrint = printers.find((p) => p.id === calcForm.printerId);
-    const weightToDeduct = Number(calculationResults.effectiveWeightG.toFixed(1));
+    const materialsUsedList = calculationResults.detailsUsed;
 
-    // Se houver valor personalizado válido (> 0), usa ele; caso contrário, usa o valor da calculadora
+    const summaryLabel = materialsUsedList.length > 0
+      ? materialsUsedList.map(m => `${m.label} (${m.grams.toFixed(1)}g)`).join(' + ')
+      : 'Material Padrão';
+
     const hasCustomPrice =
       orderForm.customPrice !== '' &&
       orderForm.customPrice !== null &&
@@ -2164,6 +2167,7 @@ export default function App() {
 
     const finalCost = Number(calculationResults.totalCost.toFixed(2));
     const finalNetProfit = Number((finalSalePrice - finalCost).toFixed(2));
+    const totalWeight = Number(calculationResults.effectiveWeightG.toFixed(1));
 
     try {
       const { data: created, error } = await supabase
@@ -2172,29 +2176,33 @@ export default function App() {
           user_id: session.user.id,
           client_name: orderForm.clientName.trim(),
           piece_name: orderForm.pieceName.trim(),
-          client_whatsapp: orderForm.clientWhatsapp.trim(), // <-- Adicionado
-          material_id: selMat?.id || null,
-          material_label: selMat ? `${selMat.type}: ${selMat.name} (${selMat.color})` : 'Não informado',
+          client_whatsapp: orderForm.clientWhatsapp.trim(),
+          material_id: materialsUsedList[0]?.materialId || null,
+          material_label: summaryLabel,
           printer_label: selPrint ? selPrint.name : 'Padrão',
-          weight_grams: weightToDeduct,
+          weight_grams: totalWeight,
           print_hours: Number(calcForm.printHours) || 0,
           total_cost: finalCost,
           suggested_price: finalSalePrice,
           net_profit: finalNetProfit,
           status: orderForm.deductStockNow ? 'Aprovado / Imprimindo' : 'Orçamento',
-          stock_deducted: Boolean(orderForm.deductStockNow && selMat)
+          stock_deducted: Boolean(orderForm.deductStockNow),
+          materials_used: materialsUsedList
         })
         .select('*')
         .single();
 
       if (error) throw error;
 
-      if (orderForm.deductStockNow && selMat) {
-        await handleAdjustMaterialStock(
-          selMat.id,
-          -weightToDeduct,
-          `Orçamento salvo por R$ ${finalSalePrice.toFixed(2)} e baixa de ${weightToDeduct}g aplicada!`
-        );
+      if (orderForm.deductStockNow) {
+        for (const item of materialsUsedList) {
+          await handleAdjustMaterialStock(
+            item.materialId,
+            -item.grams,
+            null
+          );
+        }
+        showToast(`Orçamento salvo e baixa realizada no estoque de todas as cores!`);
       } else {
         showToast(`Orçamento salvo no Histórico por R$ ${finalSalePrice.toFixed(2)}!`);
       }
@@ -2316,17 +2324,37 @@ export default function App() {
 
   const calculationResults = useMemo(() => {
     const selectedPrinter = printers.find((p) => p.id === calcForm.printerId);
-    const selectedMaterial = materials.find((m) => m.id === calcForm.materialId);
 
-    const weightG = Number(calcForm.weightGrams) || 0;
-    const hours = Number(calcForm.printHours) || 0;
     const failurePct = Number(calcForm.failureRate) || 0;
+    const hours = Number(calcForm.printHours) || 0;
     const laborH = Number(calcForm.laborHours) || 0;
     const profitPct = Number(calcForm.profitMarginPct) || 0;
 
-    const pricePerKgOrL = selectedMaterial ? Number(selectedMaterial.price_per_unit) || 0 : 80;
-    const effectiveWeightG = weightG * (1 + failurePct / 100);
-    const materialCost = (effectiveWeightG / 1000) * pricePerKgOrL;
+    let totalMaterialCost = 0;
+    let totalEffectiveWeightG = 0;
+    const detailsUsed = [];
+
+    const activeList = calcForm.multiMaterials.length > 0
+      ? calcForm.multiMaterials
+      : [{ materialId: calcForm.materialId, grams: Number(calcForm.weightGrams) || 0 }];
+
+    activeList.forEach((item) => {
+      const mat = materials.find((m) => m.id === item.materialId);
+      const grams = Number(item.grams) || 0;
+      if (grams > 0) {
+        const effectiveG = grams * (1 + failurePct / 100);
+        const pricePerUnit = mat ? Number(mat.price_per_unit) || 0 : 80;
+        const cost = (effectiveG / 1000) * pricePerUnit;
+
+        totalMaterialCost += cost;
+        totalEffectiveWeightG += effectiveG;
+        detailsUsed.push({
+          materialId: item.materialId,
+          label: mat ? `${mat.type}: ${mat.name} (${mat.color})` : 'Material',
+          grams: effectiveG
+        });
+      }
+    });
 
     const powerW = selectedPrinter ? Number(selectedPrinter.power_watts) || 150 : 150;
     const energyKWh = (powerW * hours) / 1000;
@@ -2337,7 +2365,7 @@ export default function App() {
     const depreciationPerHour = lifespanH > 0 ? printerVal / lifespanH : 0;
     const depreciationCost = depreciationPerHour * hours;
 
-    const subtotalDirect = materialCost + energyCost + depreciationCost;
+    const subtotalDirect = totalMaterialCost + energyCost + depreciationCost;
     const postProcBasePct = Number(settings.default_post_processing_pct || 15);
     let postProcCost = subtotalDirect * (postProcBasePct / 100);
     if (calcForm.washed) postProcCost += 3.00;
@@ -2351,7 +2379,7 @@ export default function App() {
     const netProfit = suggestedPrice - totalCost;
 
     return {
-      materialCost,
+      materialCost: totalMaterialCost,
       energyCost,
       depreciationCost,
       postProcCost,
@@ -2359,9 +2387,33 @@ export default function App() {
       totalCost,
       suggestedPrice,
       netProfit,
-      effectiveWeightG
+      effectiveWeightG: totalEffectiveWeightG,
+      detailsUsed
     };
   }, [calcForm, printers, materials, settings]);
+
+  const handleAddMaterialToCalc = () => {
+    const defaultMatId = materials[0]?.id || '';
+    setCalcForm((prev) => ({
+      ...prev,
+      multiMaterials: [...prev.multiMaterials, { materialId: defaultMatId, grams: 50 }]
+    }));
+  };
+
+  const handleUpdateCalcMaterial = (index, field, value) => {
+    setCalcForm((prev) => {
+      const updated = [...prev.multiMaterials];
+      updated[index] = { ...updated[index], [field]: value };
+      return { ...prev, multiMaterials: updated };
+    });
+  };
+
+  const handleRemoveCalcMaterial = (index) => {
+    setCalcForm((prev) => ({
+      ...prev,
+      multiMaterials: prev.multiMaterials.filter((_, i) => i !== index)
+    }));
+  };
 
   const renderLogo = (sizeClass = 'w-10 h-10') => (
     <div className={`${sizeClass} rounded-xl overflow-hidden bg-[#e4e0d7] flex items-center justify-center border border-[#262522] shrink-0`}>
@@ -3763,7 +3815,7 @@ export default function App() {
                   <div className="p-2 rounded-xl bg-[#e4e0d7] text-[#000000]"><Calculator className="w-6 h-6" /></div>
                   <div>
                     <h2 className="text-lg font-bold text-[#e4e0d7]">Calculadora de Gastos e Precificação</h2>
-                    <p className="text-xs text-[#8c877e]">Calcule o custo exato de produção e defina seu preço de venda com lucro.</p>
+                    <p className="text-xs text-[#8c877e]">Adicione uma ou mais cores/materiais e calcule o custo total e o preço de venda.</p>
                   </div>
                 </div>
                 <div className="flex gap-2">
@@ -3775,6 +3827,65 @@ export default function App() {
                   </button>
                 </div>
               </div>
+
+              {/* SEÇÃO DE MÚLTIPLAS CORES / MATERIAIS */}
+              <div className="space-y-3 pt-4 border-t border-[#1c1b19]">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-[#a39e93]">Cores / Filamentos / Resinas usados no pedido:</label>
+                  <button
+                    type="button"
+                    onClick={handleAddMaterialToCalc}
+                    className="px-3 py-1.5 bg-[#e4e0d7] hover:bg-[#d5d0c5] text-[#000000] rounded-xl text-xs font-bold cursor-pointer transition flex items-center gap-1"
+                  >
+                    <Plus className="w-3.5 h-3.5" /><span>Adicionar Cor / Material</span>
+                  </button>
+                </div>
+
+                {calcForm.multiMaterials.length === 0 ? (
+                  <div className="p-4 rounded-xl bg-[#000000] border border-dashed border-[#262522] text-center text-xs text-[#8c877e] space-y-1">
+                    <p>Nenhuma cor adicional adicionada na lista múltipla.</p>
+                    <p className="text-[11px] text-[#c89d66]">Clique em "+ Adicionar Cor / Material" para usar mais de uma cor no orçamento.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {calcForm.multiMaterials.map((item, idx) => (
+                      <div key={idx} className="flex flex-col sm:flex-row items-center gap-2 p-3 rounded-xl bg-[#000000] border border-[#262522]">
+                        <select
+                          value={item.materialId}
+                          onChange={(e) => handleUpdateCalcMaterial(idx, 'materialId', e.target.value)}
+                          className="flex-1 w-full px-3 py-2 bg-[#0a0a0a] border border-[#262522] rounded-xl text-xs text-[#e4e0d7]"
+                        >
+                          {materials.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.type}: {m.name} ({m.color}) - R$ {m.price_per_unit}/kg
+                            </option>
+                          ))}
+                        </select>
+                        <div className="flex items-center gap-2 w-full sm:w-auto">
+                          <input
+                            type="number"
+                            min="1"
+                            value={item.grams}
+                            onChange={(e) => handleUpdateCalcMaterial(idx, 'grams', Number(e.target.value))}
+                            placeholder="Gramas"
+                            className="w-28 px-3 py-2 bg-[#0a0a0a] border border-[#262522] rounded-xl text-xs text-[#e4e0d7]"
+                          />
+                          <span className="text-xs text-[#8c877e]">g</span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveCalcMaterial(idx)}
+                            className="p-2 text-[#b94a48] hover:text-white cursor-pointer"
+                            title="Remover cor"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pt-4 border-t border-[#1c1b19]">
                 <div>
                   <label className="block text-xs font-medium text-[#a39e93] mb-1">Impressora</label>
@@ -3782,19 +3893,6 @@ export default function App() {
                     {printers.length === 0 && <option value="">Nenhuma impressora cadastrada</option>}
                     {printers.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.power_watts}W)</option>)}
                   </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Material (Filamento / Resina)</label>
-                  <select value={calcForm.materialId} onChange={(e) => setCalcForm({ ...calcForm, materialId: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]">
-                    {materials.length === 0 && <option value="">Nenhum material cadastrado</option>}
-                    {materials.map((m) => <option key={m.id} value={m.id}>{m.type}: {m.name} ({m.color}) - R$ {m.price_per_unit}/kg</option>)}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-[#a39e93] mb-1">Peso da Peça (gramas / ml)</label>
-                  <input type="number" min={1} value={calcForm.weightGrams} onChange={(e) => setCalcForm({ ...calcForm, weightGrams: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
                 </div>
 
                 <div>
@@ -3807,7 +3905,7 @@ export default function App() {
                   <input type="number" min={0} value={calcForm.failureRate} onChange={(e) => setCalcForm({ ...calcForm, failureRate: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
                 </div>
 
-                <div>
+                <div className="sm:col-span-2 lg:col-span-3">
                   <label className="block text-xs font-medium text-[#a39e93] mb-1">Mão de Obra (Horas de Dedicação)</label>
                   <input type="number" step="0.1" min={0} value={calcForm.laborHours} onChange={(e) => setCalcForm({ ...calcForm, laborHours: e.target.value })} className="w-full px-3 py-2 bg-[#000000] border border-[#262522] rounded-xl text-sm text-[#e4e0d7]" />
                 </div>
