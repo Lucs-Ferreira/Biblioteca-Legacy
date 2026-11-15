@@ -90,7 +90,11 @@ export default function App() {
 
   const [googleToken, setGoogleToken] = useState(() => localStorage.getItem('stl_google_access_token') || '');
   const [googleUserEmail, setGoogleUserEmail] = useState(() => localStorage.getItem('stl_google_email') || '');
-  const [googleConnected, setGoogleConnected] = useState(false);
+  const [googleConnected, setGoogleConnected] = useState(() => {
+    const token = localStorage.getItem('stl_google_access_token');
+    const expiry = Number(localStorage.getItem('stl_google_token_expiry') || 0);
+    return Boolean(token && Date.now() < expiry);
+  });
 
   const refreshTokenRef = useRef(localStorage.getItem('stl_google_refresh_token') || '');
   const refreshPromiseRef = useRef(null);
@@ -2908,7 +2912,7 @@ export default function App() {
 
       {/* Banner Google Drive */}
       {(!googleConnected || !settings.root_folder_id) && (
-        <div className="bg-[#12110f] border-b border-[#e4e0d7]/20">
+        <div className={`bg-[#12110f] border-b border-[#e4e0d7]/20 transition-opacity duration-150 ${localStorage.getItem('stl_google_access_token') ? 'opacity-0 pointer-events-none absolute' : 'opacity-100'}`}>
           <div className="max-w-7xl mx-auto px-3 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2.5 text-xs sm:text-sm text-[#e4e0d7]">
               <HardDrive className="w-5 h-5 text-[#c89d66] shrink-0" />
